@@ -18,6 +18,7 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 import pickle
 import threading
+import rasterio
 
 # set the path to the data
 """Structure of data:
@@ -178,12 +179,19 @@ class SatellitePreprocessor:
         split_type; 'train' or 'val'
         file_pairs: List of (image_path, mask_path) tuples
 
+        Images are tiff, therefore using rasterio
         """
         for img_path, mask_path in file_pairs:
             try:
-                # load image
-                image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-                mask = cv2.imread(str(mask_path))
+                # load image using rasterio
+                with rasterio.open(img_path) as src_img:
+                    image = src_img.read(1)  # Read first band as grayscale
+                with rasterio.open(mask_path) as src_mask:
+                    if src_mask.count == 1:
+                        mask = src_mask.read(1)
+                        mask = np.stack([mask]*3, axis=-1)  # Convert to 3-channel if needed
+                    else:
+                        mask = np.transpose(src_mask.read(), (1, 2, 0))  # (bands, h, w) -> (h, w, bands)
 
                 if image is None or mask is None:
                     print(f"Error loading image or mask: {img_path}, {mask_path}")
@@ -383,14 +391,14 @@ class SatellitePreprocessor:
 #Main configuration 
 if __name__ == "__main__":
     BASE_DATA_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB"
-    OUTPUT_DIR = "processed_satellite_data"
+    OUTPUT_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/preprocessed_data"
     PATCH_SIZE = 256
     OVERLAP_TRAIN = 128 # half patch size
     OVERLAP_VAL = 128
     
     # Create preprocessor and run
     preprocessor = SatellitePreprocessor(
-        base_data_dir=BASE_DATA_DIR,
+        base_dir=BASE_DATA_DIR,
         output_dir=OUTPUT_DIR,
         patch_size=PATCH_SIZE,
         overlap_train=OVERLAP_TRAIN,
