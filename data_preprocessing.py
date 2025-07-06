@@ -8,7 +8,25 @@ Steps involved for preprocessing the Sentinel-1, ERS and Envisat scenes:
 
 Code inspired by CAFFE - Gourmelon et al. 2022
 
+BAND_MAPPING = {
+    "Sentinel-1": {
+        "HH": 1,  # First band in Sentinel-1 data is HH polarization
+        "HV": 2,  # Second band is HV polarization
+        "DEM": 3, # Third band is DEM (Digital Elevation Model)
+        "RATIO": 4 # Fourth band is HH/HV ratio
+    },
+    "ERS": {
+        "VV": 1,  # First band in ERS data is VV polarization
+        "DEM": 2  # Second band is DEM
+    },
+    "Envisat": {
+        "VV": 1,  # First band in Envisat data is VV polarization
+        "DEM": 2  # Second band is DEM
+    }
+}
 """
+
+#TODO: Some patches and masks mismatched. Background isn't working. 0 = ice (white), 1 = everything else
 
 # import libraries
 import os
@@ -35,9 +53,7 @@ benchmark_data_CB
 ------masks
 ------ scenes
 ------ vectors
-
 """
-
 
 # all paths
 parent_dir = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB"
@@ -45,9 +61,8 @@ S1_dir = os.path.join(parent_dir, "Sentinel-1")
 ERS_dir = os.path.join(parent_dir, "ERS")
 Envisat_dir = os.path.join(parent_dir, "Envisat")
 
-
 class SatellitePreprocessor:
-    def __init__(self, base_dir, output_dir, patch_size = 256, overlap_train=0, overlap_val =128):
+    def __init__(self, base_dir, output_dir, patch_size = 256, overlap_train=0, overlap_val =0):
 
         """ 
         A class to preprocess satellite data for training and validation.
@@ -57,13 +72,12 @@ class SatellitePreprocessor:
             overlap_train: Overlap for training patches (default: 0)
             overlap_val: Overlap for validation patches (default: 128)
         """
-
         self.base_dir = Path(base_dir)
         self.output_dir = Path(output_dir)
         self.patch_size = patch_size
         self.overlap_train = overlap_train
         self.overlap_val = overlap_val
-
+       
         self.satellite_dirs = {
             'Sentinel-1': self.base_dir / 'Sentinel-1',
             'ERS': self.base_dir / 'ERS',
@@ -83,6 +97,7 @@ class SatellitePreprocessor:
                 output_path.mkdir(parents=True, exist_ok=True)
         
         (self.output_dir /'data_splits').mkdir(exist_ok=True)
+
         
     def _resize_image(self,image,satellite):
         """
@@ -108,18 +123,26 @@ class SatellitePreprocessor:
             # Sentinel-1 is already at 40m resolution
             return image
 
-    def _convert_mask_to_greyscale(self, mask):
+    def _convert_mask_to_grayscale(mask):
         """
-        Convert RGB masks to greyscale. 
-        Currently masks are RGB, but only 2 classes
+        Convert masks to grayscale format, preserving original values
         """
-        if len(mask.shape) == 3 and mask.shape[2] == 3:
-            grey_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-            _, binary_mask = cv2.threshold(grey_mask, 127, 255, cv2.THRESH_BINARY)
-            return binary_mask
+        if len(mask.shape) == 3 and mask.shape[2] >= 3:
+            # Convert RGB to grayscale
+            grey_mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+        elif len(mask.shape) == 2:
+            # Already grayscale
+            grey_mask = mask
+        else:
+            print(f"Warning: Unexpected mask shape: {mask.shape}")
+            return mask
         
+        # Ensure it's in 0-255 range for PNG saving
+        if grey_mask.max() > 255:
+            grey_mask = ((grey_mask - grey_mask.min()) / (grey_mask.max() - grey_mask.min()) * 255).astype(np.uint8)
+            mask = grey_mask
+
         return mask
-    
 
     def _pad_image(self, image, patch_size, overlap):
         """
@@ -172,6 +195,64 @@ class SatellitePreprocessor:
                 coords.append((y, x))
         return np.array(patches), coords
     
+    def _convert_to_db(self, input_image):
+        input_image = np.maximum(input_image, 1e-10)  # Avoid log(0)
+        return 10 * np.log10(input_image)
+    
+    def _normalise_scale(self, input_image,percentile_clip=True):
+        # might have nans - old version using min and max, didn't produced desired high contrast images
+        # image_max = np.nanmax(input_image)
+        # image_min = np.nanmin(input_image)
+        # out_image = (input_image - image_min) / (image_max - image_min)
+
+        if percentile_clip:
+                    # Use percentile clipping to avoid extreme values dominating normalization
+            p2, p98 = np.nanpercentile(input_image, [2, 98])
+            input_image = np.clip(input_image, p2, p98)
+                
+        image_max = np.nanmax(input_image)
+        image_min = np.nanmin(input_image)
+                
+                # Avoid division by zero
+        if image_max == image_min:
+            return np.zeros_like(input_image)
+                    
+        out_image = (input_image - image_min) / (image_max - image_min)
+            
+        return out_image
+
+     
+    def _normalise_image(self, image, satellite_type):
+        """ 
+        Normalise image on individual patches
+
+        """
+        if satellite_type in ['Sentinel-1', 'ERS', 'Envisat']:
+            # Create a copy to avoid modifying original
+            image_copy = image.copy().astype(np.float64)
+            
+            # Convert the 0 values (background) to nans
+            image_copy[image_copy == 0] = np.nan
+            
+            # Convert to decibel scale
+            decibel_image = self._convert_to_db(image_copy)
+            
+            # Normalise the decibel scale (using patch-specific min/max)
+            normalised_image = self._normalise_scale(decibel_image,percentile_clip=True)
+
+            # Convert NaNs back to 0 for background
+            normalised_image[np.isnan(normalised_image)] = 0
+             
+            # Convert to integer values
+            normalised_image = (normalised_image * 255).astype(np.uint8)
+            return normalised_image
+        
+        return image
+    
+    # TODO: sorting out the mismatch in patches
+    
+
+
     def _process_satellite_data(self, satellite, split_type, file_pairs, overlap):
         """
         Process satellite imagery for a specific split i.e train or val
@@ -181,22 +262,44 @@ class SatellitePreprocessor:
 
         Images are tiff, therefore using rasterio
         """
+
+        print(f"Processing {len(file_pairs)} {satellite} files for {split_type}")
+        
         for img_path, mask_path in file_pairs:
             try:
                 # load image using rasterio
                 with rasterio.open(img_path) as src_img:
                     image = src_img.read(1)  # Read first band as grayscale
+                    print(f"Image shape: {image.shape}, dtype: {image.dtype}")
+                    print(f"Image value range: {image.min():.3f} to {image.max():.3f}")
+                    # Check for valid data
+                    valid_pixels = image[image != 0]
+                    if len(valid_pixels) == 0:
+                        print(f"Warning: No valid pixels in {img_path.name}")
+                        continue
+                    
+                    print(f"Valid pixel range: {valid_pixels.min():.3f} to {valid_pixels.max():.3f}")
+
+
                 with rasterio.open(mask_path) as src_mask:
                     if src_mask.count == 1:
                         mask = src_mask.read(1)
-                        mask = np.stack([mask]*3, axis=-1)  # Convert to 3-channel if needed
+                        # mask = np.stack([mask]*3, axis=-1)  # Convert to 3-channel if needed
                     else:
                         mask = np.transpose(src_mask.read(), (1, 2, 0))  # (bands, h, w) -> (h, w, bands)
+                print(f"Mask shape: {mask.shape}, dtype: {mask.dtype}")
+
 
                 if image is None or mask is None:
                     print(f"Error loading image or mask: {img_path}, {mask_path}")
                     continue
             
+
+                #THIS CURRENTLY NORMALISES WHOLE IMAGE WHICH WE DONT WANT TO DO
+                # # Normalise image to uint8 for PNG saving
+                # image_uint8 = self._normalise_image(image, satellite) #whole image
+                # print(f"Normalised image range: {image_uint8.min()} to {image_uint8.max()}")
+
                 ################################################
                 #        Resize to 40m resolution          #
                 ################################################
@@ -212,13 +315,13 @@ class SatellitePreprocessor:
                 ########################################################
                 #        Pad image and mask for patch extraction       #
                 ########################################################
-                image_padded, pad_h, pad_w = self._pad_image(image, self.patch_size, overlap)
+                image_padded, pad_h, pad_w = self._pad_image(image, self.patch_size, overlap) # for whole image use image_uint8
                 mask_padded, _, _ = self._pad_image(mask, self.patch_size, overlap)
 
                 ########################################################
                 #        Extract patches from padded image and mask    #
                 ########################################################
-                image_patches, coords = self._extract(image_padded, self.patch_size, overlap)
+                image_patches, coords = self._extract(image_padded, self.patch_size, overlap) #patches from normalised image
                 mask_patches, _ = self._extract(mask_padded, self.patch_size, overlap)
 
                 ########################################################
@@ -229,12 +332,32 @@ class SatellitePreprocessor:
                 for i, (img_patch, mask_patch) in enumerate(zip(image_patches, mask_patches)):
                     y,x = coords[i]
 
+                    # IMPORTANT: Check for background BEFORE normalization
+                    # Use a small tolerance for floating point comparison
+                    background_threshold = 1e-6
+                    background_mask = np.abs(img_patch) <= background_threshold
+                    
+                    # Skip patches that are all background or greater than 80% background
+                    if np.all(background_mask):
+                        continue  # Skip saving this patch
+                    if np.mean(background_mask) > 0.8:
+                        continue
+
+                    normalised_patch = self._normalise_image(img_patch, satellite)
+                    
+                    # Additional check after normalization - sometimes normalization can create all-black patches
+                    if np.all(normalised_patch == 0) or np.mean(normalised_patch == 0) > 0.8:
+                        continue
+                    # Debug: Check patch values after normalization
+                    print(f"Patch {i}: Original range [{img_patch.min():.3f}, {img_patch.max():.3f}] -> "
+                      f"Normalized range [{normalised_patch.min()}, {normalised_patch.max()}]")
+
                     #create a patch name
                     patch_name = f"{base_filename}__{pad_h}_{pad_w}_{i}_{y}_{x}.png"
 
                     # Save image patch
                     img_output_path = self.output_dir / split_type / 'images' / patch_name
-                    cv2.imwrite(str(img_output_path), img_patch)
+                    cv2.imwrite(str(img_output_path), normalised_patch)
                     
                     # Save mask patch
                     mask_output_path = self.output_dir / split_type / 'masks' / patch_name
@@ -257,23 +380,47 @@ class SatellitePreprocessor:
         if not scenes_dir.exists() or not masks_dir.exists():
             print(f"Scenes or masks directory does not exist for {satellite_dir}")
             return []
-        image_files = list(scenes_dir.glob('*.tif'))
-        file_pairs = []
-        for img_path in image_files:
-            mask_candidates = [
-             
-                masks_dir / f"{img_path.stem}.tif"
-            ]
-            mask_path = None
-            for candidate in mask_candidates:
-                if candidate.exists():
-                    mask_path = candidate
-                    break
             
-            if mask_path:
+        image_files = list(scenes_dir.glob('*.tif'))
+        mask_files = list(masks_dir.glob('*.tif'))
+        
+        print(f"Found {len(image_files)} image files and {len(mask_files)} mask files")
+        
+        file_pairs = []
+        unmatched_images = []
+        unmatched_masks = []
+        
+        # Create a set of mask stems for quick lookup
+        mask_stems = {mask_file.stem for mask_file in mask_files}
+        
+        for img_path in image_files:
+            if img_path.stem in mask_stems:
+                mask_path = masks_dir / f"{img_path.stem}.tif"
                 file_pairs.append((img_path, mask_path))
             else:
-                print(f"No matching mask found for {img_path}")
+                unmatched_images.append(img_path.name)
+        
+        # Find unmatched masks
+        image_stems = {img_file.stem for img_file in image_files}
+        for mask_file in mask_files:
+            if mask_file.stem not in image_stems:
+                unmatched_masks.append(mask_file.name)
+        
+        # Log unmatched files
+        if unmatched_images:
+            print(f"WARNING: {len(unmatched_images)} unmatched image files:")
+            for img_name in unmatched_images[:5]:  # Show first 5
+                print(f"  - {img_name}")
+            if len(unmatched_images) > 5:
+                print(f"  ... and {len(unmatched_images) - 5} more")
+        
+        if unmatched_masks:
+            print(f"WARNING: {len(unmatched_masks)} unmatched mask files:")
+            for mask_name in unmatched_masks[:5]:  # Show first 5
+                print(f"  - {mask_name}")
+            if len(unmatched_masks) > 5:
+                print(f"  ... and {len(unmatched_masks) - 5} more")
+        
         return file_pairs
     
     def _create_data_splits(self, all_file_pairs,validation_split=0.1, random_seed=42):
@@ -296,7 +443,7 @@ class SatellitePreprocessor:
         indices = np.arange(len(all_file_pairs))
         train_idx, val_idx = train_test_split(
             indices,
-            test_size= validation_split,
+            test_size= 0.15,   #this accounts roughly for after filtering blank images - TODO: check and improve this to get proper 0.1 val split
             random_state=random_seed,
             shuffle=True
         )
@@ -315,6 +462,8 @@ class SatellitePreprocessor:
     def process_all(self):
         """
         Main processing function
+        TODO: Current issue that the train/val split is not 90/10 bc the background check is applied after creating the train test split
+        Currently only accounted this for upping the original split
         """
         print("=" * 60)
         print("SATELLITE IMAGERY PREPROCESSING PIPELINE")
@@ -393,8 +542,8 @@ if __name__ == "__main__":
     BASE_DATA_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB"
     OUTPUT_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/preprocessed_data"
     PATCH_SIZE = 256
-    OVERLAP_TRAIN = 128 # half patch size
-    OVERLAP_VAL = 128
+    OVERLAP_TRAIN = 0 
+    OVERLAP_VAL = 0
     
     # Create preprocessor and run
     preprocessor = SatellitePreprocessor(
