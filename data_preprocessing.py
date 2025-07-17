@@ -3,7 +3,7 @@ Steps involved for preprocessing the Sentinel-1, ERS and Envisat scenes:
 1. Set a naming convention: [SAT]_[YYYYMMDD]_[POLARISATION]_[EXTRA]  ⭐️
 2. Keep patches at their original res: Envisat and ERS are 30 m, Sentinel-1 is 40 m). 
  - create a val dataset with 10% of the data (some hard some easy scenes) from the training set
-3. Images are greyscale, masks are RBG - convert masks to greyscale as only 2 classes
+3. Images are greyscale, masks are greyscale
 4. Patch the images and masks
 
 Code inspired by CAFFE - Gourmelon et al. 2022
@@ -26,7 +26,7 @@ BAND_MAPPING = {
 }
 """
 
-#TODO: Some patches and masks mismatched. Background isn't working. 0 = ice (white), 1 = everything else
+#TODO: Mismatching fixed, issue was just when the code stops running and is misaligned between pairs. Background isn't working. 0 = ice (white), 1 = everything else
 
 # import libraries
 import os
@@ -103,7 +103,6 @@ class SatellitePreprocessor:
         """
         IGNORE THIS FUNCTION
 
-
         Resize images all to 40m resolution, sentinel-1 is already 40m, so 
         only need to downscale ERS and Envisat images.
 
@@ -123,26 +122,17 @@ class SatellitePreprocessor:
             # Sentinel-1 is already at 40m resolution
             return image
 
-    def _convert_mask_to_grayscale(mask):
+    def _normalise_mask_vals(self, mask):
         """
-        Convert masks to grayscale format, preserving original values
+        Normalize mask values from 0-1 range to 0-255 range
+        Assumes mask is already grayscale (single channel)
         """
-        if len(mask.shape) == 3 and mask.shape[2] >= 3:
-            # Convert RGB to grayscale
-            grey_mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
-        elif len(mask.shape) == 2:
-            # Already grayscale
-            grey_mask = mask
+        if mask.max() <= 1:
+            # Convert from 0-1 to 0-255
+            return (mask * 255).astype(np.uint8)
         else:
-            print(f"Warning: Unexpected mask shape: {mask.shape}")
-            return mask
-        
-        # Ensure it's in 0-255 range for PNG saving
-        if grey_mask.max() > 255:
-            grey_mask = ((grey_mask - grey_mask.min()) / (grey_mask.max() - grey_mask.min()) * 255).astype(np.uint8)
-            mask = grey_mask
-
-        return mask
+            # Already in proper range
+            return mask.astype(np.uint8)
 
     def _pad_image(self, image, patch_size, overlap):
         """
@@ -248,9 +238,6 @@ class SatellitePreprocessor:
             return normalised_image
         
         return image
-    
-    # TODO: sorting out the mismatch in patches
-    
 
 
     def _process_satellite_data(self, satellite, split_type, file_pairs, overlap):
@@ -280,11 +267,10 @@ class SatellitePreprocessor:
                     
                     print(f"Valid pixel range: {valid_pixels.min():.3f} to {valid_pixels.max():.3f}")
 
-
                 with rasterio.open(mask_path) as src_mask:
                     if src_mask.count == 1:
                         mask = src_mask.read(1)
-                        # mask = np.stack([mask]*3, axis=-1)  # Convert to 3-channel if needed
+                        
                     else:
                         mask = np.transpose(src_mask.read(), (1, 2, 0))  # (bands, h, w) -> (h, w, bands)
                 print(f"Mask shape: {mask.shape}, dtype: {mask.dtype}")
@@ -309,7 +295,7 @@ class SatellitePreprocessor:
                 ################################################
                 #        Convert mask to greyscale          #
                 ################################################
-                mask = self._convert_mask_to_greyscale(mask)
+                mask = self._normalise_mask_vals(mask)
                 ################################################
 
                 ########################################################
