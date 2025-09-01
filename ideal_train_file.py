@@ -1,26 +1,18 @@
 import os
 import torch
-from torch.utils.data import DataLoader
-from dataset_class import GlacierSegDataset
-import segmentation_models_pytorch as smp
-import tqdm
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 import gc
 import wandb
-import numpy as np
-from monai.losses import DiceLoss, DiceCELoss, FocalLoss
-import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-import random
 import hydra
 import logging
 from omegaconf import DictConfig
-from typing import Tuple, Optional
 from misc_functions import set_seed, init_wandb, save_model
-from load_functions import get_data_loaders, load_model, get_optimizer, get_scheduler, get_loss_function
+from load_functions import (
+    get_data_loaders,
+    load_model,
+    get_optimizer,
+    get_scheduler,
+    get_loss_function,
+)
 from train_functions import train_one_epoch, validate
 
 """ 
@@ -39,7 +31,8 @@ def main(cfg: DictConfig):
     # Set random seed
     set_seed(cfg["seed"])
 
-    init_wandb(cfg)
+    # TODO: it was signing me in as Jowan so removed it
+    # init_wandb(cfg)
     # Initialize wandb with sweep configuration
 
     print("wandb init done")
@@ -88,7 +81,8 @@ def main(cfg: DictConfig):
             model, val_loader, loss_function, device, cfg, log, epoch=epoch
         )
         # Update scheduler
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
 
         if cfg.get("use_wandb", False):
             wandb.log({"train_loss": train_loss, "epoch": epoch})
@@ -105,3 +99,7 @@ def main(cfg: DictConfig):
         # Clear memory
         torch.cuda.empty_cache()
         gc.collect()
+
+
+if __name__ == "__main__":
+    main()
