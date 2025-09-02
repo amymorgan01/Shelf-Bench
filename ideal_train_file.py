@@ -1,3 +1,10 @@
+""" Main Train file for ICE-BENCH, including HYDRA IMPLEMENTATION
+
+To run all models: uv run ideal_train_file.py -m model.name=Unet,FPN,ViT,DeepLabV3 other parameters...
+
+"""
+
+
 import os
 import torch
 import gc
@@ -15,9 +22,7 @@ from load_functions import (
 )
 from train_functions import train_one_epoch, validate
 
-""" 
-HYDRA IMPLEMENTATION
-"""
+
 log = logging.getLogger(__name__)
 
 
@@ -31,8 +36,8 @@ def main(cfg: DictConfig):
     # Set random seed
     set_seed(cfg["seed"])
 
-    # TODO: it was signing me in as Jowan so removed it
-    # init_wandb(cfg)
+    # TODO: sort out wandb 
+    init_wandb(cfg)
     # Initialize wandb with sweep configuration
 
     print("wandb init done")
@@ -85,7 +90,7 @@ def main(cfg: DictConfig):
             scheduler.step()
 
         if cfg.get("use_wandb", False):
-            wandb.log({"train_loss": train_loss, "epoch": epoch})
+            wandb.log({"val_loss": val_loss, "epoch": epoch})
 
         if val_loss > best_val_loss:
             best_val_loss = val_loss
@@ -103,3 +108,5 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
+
+

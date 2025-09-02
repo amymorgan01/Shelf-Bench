@@ -1,3 +1,9 @@
+
+""""
+Loading function for ICE-BENCH: trainloader, valloader, models loaded, optimisers and schedulers
+
+"""
+
 import os
 import torch
 from torch.utils.data import DataLoader
@@ -8,7 +14,7 @@ import torch.optim as optim
 
 from monai.losses import DiceLoss, DiceCELoss, FocalLoss
 from combined_loss import CombinedLoss
-
+from models.ViT import create_vit_large_16
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from omegaconf import DictConfig
 from typing import Tuple
@@ -51,6 +57,8 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
     encoder_weights = cfg["model"]["encoder_weights"]
     in_channels = cfg["model"]["in_channels"]
     classes = cfg["model"]["classes"]
+    img_size = cfg["model"]["img_size"]
+    pretrained_path = cfg["model"]["pretrained_path"]
 
     if model_name == "Unet":
         model = smp.Unet(
@@ -59,6 +67,7 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
+        #remove this model
     elif model_name == "FPN":
         model = smp.FPN(
             encoder_name=encoder_name,
@@ -66,6 +75,18 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
+        # add ViT
+
+    elif model_name == "ViT":
+      model = create_vit_large_16(num_classes=classes, 
+                                  img_size=img_size, 
+                                  pretrained_path=pretrained_path,
+                                  classes=classes)
+
+       
+        #add NNUNet or similar
+
+
     elif model_name == "DeepLabV3":
         model = smp.DeepLabV3(
             encoder_name=encoder_name,

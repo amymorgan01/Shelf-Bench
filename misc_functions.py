@@ -1,3 +1,9 @@
+"""
+
+
+"""
+
+
 import random
 import numpy as np
 import torch
@@ -6,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 import logging
 import torch.nn as nn
 import torch.optim as optim
+import wandb
 
 
 # Set random seeds for reproducibility
@@ -21,8 +28,8 @@ def set_seed(seed=42):
 def init_wandb(cfg: DictConfig):
     if wandb.run is None:
         wandb.init(
-            project="CAFFE",
-            name="seg_improved_glacier",
+            project="ICE-BENCH",
+            # name="trial_initial_runs",
             entity="amy-morgan-university-of-oxford",
             settings=wandb.Settings(start_method="thread"),
             job_type="training",
