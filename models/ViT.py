@@ -15,6 +15,8 @@ import numpy as np
 from torch.nn import Dropout, Softmax, Linear, Conv2d, LayerNorm
 import copy
 import math
+from torchvision.models import vit_l_16, ViT_L_16_Weights
+
 
 # Configuration class for ViT-L/16
 class VisionTransformerConfig:
@@ -37,8 +39,130 @@ class VisionTransformerConfig:
         }
         
         # Training settings (can be adjusted)
-        self.n_classes = 1000  # ImageNet classes, adjust as needed
+        self.n_classes = 1000  # ImageNet classes,
         self.resnet = None
+
+# In your ViT.py file, update the ViTSegmentation class:
+
+class ViTSegmentation(nn.Module):
+    def __init__(self, num_classes=2, img_size=256, use_pretrained=True, in_channels=1):
+        super(ViTSegmentation, self).__init__()
+        
+        # Create the ViT backbone
+        if use_pretrained:
+            weights = ViT_L_16_Weights.IMAGENET1K_V1
+            # Use standard 224 size for pretrained weights
+            self.vit = vit_l_16(weights=weights)
+            self.vit_input_size = 224
+        else:
+            self.vit = vit_l_16(weights=None, image_size=img_size)
+            self.vit_input_size = img_size
+        
+        # Store original settings
+        self.img_size = img_size
+        self.patch_size = 16
+        self.num_patches_per_side = self.vit_input_size // self.patch_size
+        
+        # Get feature dimension and replace head
+        feature_dim = self.vit.heads.head.in_features  # Should be 1024 for ViT-L
+        self.vit.heads = nn.Identity()
+        
+        # Handle single channel input by replacing the first conv layer
+        if in_channels == 1:
+            original_conv = self.vit.conv_proj
+            self.vit.conv_proj = nn.Conv2d(
+                in_channels=1,
+                out_channels=original_conv.out_channels,
+                kernel_size=original_conv.kernel_size,
+                stride=original_conv.stride,
+                padding=original_conv.padding,
+                bias=original_conv.bias is not None
+            )
+            
+            # Initialize the new conv layer properly
+            if use_pretrained:
+                with torch.no_grad():
+                    # Average the RGB weights for grayscale
+                    self.vit.conv_proj.weight.copy_(
+                        original_conv.weight.mean(dim=1, keepdim=True)
+                    )
+                    if original_conv.bias is not None:
+                        self.vit.conv_proj.bias.copy_(original_conv.bias)
+        
+        # Segmentation decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(feature_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, num_classes)
+        )
+        
+    def extract_patch_features(self, x):
+        """Extract patch features from ViT backbone without using the full forward pass"""
+        B = x.shape[0]
+        
+        # Manual feature extraction to avoid issues with modified ViT
+        # 1. Patch embedding
+        x = self.vit.conv_proj(x)  # [B, hidden_dim, H_patches, W_patches]
+        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, hidden_dim]
+        
+        # 2. Add class token and position embeddings
+        cls_token = self.vit.class_token.expand(B, -1, -1)
+        x = torch.cat([cls_token, x], dim=1)
+        x = x + self.vit.encoder.pos_embedding
+        x = self.vit.encoder.dropout(x)
+        
+        # 3. Pass through transformer blocks
+        for layer in self.vit.encoder.layers:
+            x = layer(x)
+        
+        # 4. Apply final layer norm
+        x = self.vit.encoder.ln(x)
+        
+        return x
+        
+    def forward(self, x):
+        B, C, H, W = x.shape
+        
+        # Resize input if needed for pretrained model
+        if self.vit_input_size != H:
+            x_vit = F.interpolate(x, size=(self.vit_input_size, self.vit_input_size), 
+                                mode='bilinear', align_corners=False)
+        else:
+            x_vit = x
+        
+        # Extract features using manual extraction
+        features = self.extract_patch_features(x_vit)  # [B, num_patches + 1, feature_dim]
+        
+        # Remove CLS token to get only patch features
+        patch_features = features[:, 1:]  # [B, num_patches, feature_dim]
+        
+        # Verify shapes
+        expected_patches = self.num_patches_per_side ** 2
+        if patch_features.shape[1] != expected_patches:
+            raise RuntimeError(f"Expected {expected_patches} patches but got {patch_features.shape[1]}")
+        
+        # Apply decoder to each patch
+        patch_logits = self.decoder(patch_features)  # [B, num_patches, num_classes]
+        
+        # Reshape to spatial grid
+        patch_logits = patch_logits.reshape(
+            B, self.num_patches_per_side, self.num_patches_per_side, -1
+        ).permute(0, 3, 1, 2)  # [B, num_classes, H_patches, W_patches]
+        
+        # Upsample to target resolution
+        output = F.interpolate(
+            patch_logits, 
+            size=(H, W), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        
+        return output
+
 
 def swish(x):
     return x * torch.sigmoid(x)
@@ -316,18 +440,29 @@ class VisionTransformer(nn.Module):
                 if head_bias.shape[0] == self.head.bias.shape[0]:
                     self.head.bias.copy_(head_bias)
 
-def create_vit_large_16(num_classes=2, img_size=256, pretrained_path=None):
-    """Create ViT-Large/16 model"""
-    config = VisionTransformerConfig()
-    config.n_classes = num_classes
+# def create_vit_large_16(num_classes=2, img_size=256, pretrained_path=None):
+#     """Create ViT-Large/16 model"""
+#     config = VisionTransformerConfig()
+#     config.n_classes = num_classes
     
-    model = VisionTransformer(config, img_size=img_size, num_classes=num_classes)
+#     model = VisionTransformer(config, img_size=img_size, num_classes=num_classes)
     
-    if pretrained_path:
-        print(f"Loading pretrained weights from {pretrained_path}")
-        model.load_from_npz(pretrained_path)
+#     if pretrained_path:
+#         print(f"Loading pretrained weights from {pretrained_path}")
+#         model.load_from_npz(pretrained_path)
     
-    return model
+#     return model
+
+# Update your create function
+def create_vit_large_16(num_classes=2, img_size=256, use_pretrained=True, in_channels=1):
+    """Create ViT-Large/16 for segmentation"""
+    return ViTSegmentation(
+        num_classes=num_classes,
+        img_size=img_size,
+        use_pretrained=use_pretrained,
+        in_channels=in_channels
+    )
+
 
 # # Example usage
 # if __name__ == "__main__":
