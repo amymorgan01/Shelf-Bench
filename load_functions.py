@@ -11,7 +11,6 @@ import segmentation_models_pytorch as smp
 from data_processing.ice_data import IceDataset
 import torch.nn as nn
 import torch.optim as optim
-
 from monai.losses import DiceLoss, DiceCELoss, FocalLoss
 from combined_loss import CombinedLoss
 from models.ViT import create_vit_large_16
@@ -24,7 +23,7 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
     parent_dir = cfg["data"]["parent_dir"]
 
     # save the models to gws
-    os.makedirs(cfg["save_dir"], exist_ok=True)
+    # os.makedirs(cfg["save_dir"], exist_ok=True)
 
     # Load datasets
     train_dataset = IceDataset(mode="train", parent_dir=parent_dir, augment=True)
@@ -48,52 +47,59 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
         pin_memory=True,
         # persistent_workers=True,
     )
+
     return train_loader, val_loader
 
 
 def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
     model_name = cfg["model"]["name"]
-    encoder_name = cfg["model"]["encoder_name"]
-    encoder_weights = cfg["model"]["encoder_weights"]
     in_channels = cfg["model"]["in_channels"]
     classes = cfg["model"]["classes"]
-    img_size = cfg["model"]["img_size"]
-    pretrained_path = cfg["model"]["pretrained_path"]
 
     if model_name == "Unet":
+        encoder_name = cfg["model"]["encoder_name"]
+        encoder_weights = cfg["model"]["encoder_weights"]
         model = smp.Unet(
             encoder_name=encoder_name,
             encoder_weights=encoder_weights,
             in_channels=in_channels,
             classes=classes,
         )
-        #remove this model
     elif model_name == "FPN":
+        encoder_name = cfg["model"]["encoder_name"]
+        encoder_weights = cfg["model"]["encoder_weights"]
         model = smp.FPN(
             encoder_name=encoder_name,
             encoder_weights=encoder_weights,
             in_channels=in_channels,
             classes=classes,
         )
-        # add ViT
-
-    elif model_name == "ViT":
-      model = create_vit_large_16(num_classes=classes, 
-                                  img_size=img_size, 
-                                  pretrained_path=pretrained_path,
-                                  classes=classes)
-
-       
-        #add NNUNet or similar
-
 
     elif model_name == "DeepLabV3":
+        encoder_name = cfg["model"]["encoder_name"]
+        encoder_weights = cfg["model"]["encoder_weights"]
         model = smp.DeepLabV3(
             encoder_name=encoder_name,
             encoder_weights=encoder_weights,
             in_channels=in_channels,
             classes=classes,
         )
+
+    elif model_name == "ViT":
+        img_size = cfg["model"]["img_size"]
+        #pretrained_path = cfg["model"]["pretrained_path"]
+        model = create_vit_large_16(
+            num_classes=classes, 
+            img_size=img_size, 
+            use_pretrained=True,
+            in_channels=in_channels
+            #pretrained_path=pretrained_path
+        )
+        encoder_name = "ViT-Large"
+
+       
+        #add NNUNet or similar
+
     else:
         raise ValueError(f"Model {model_name} not recognized.")
 
