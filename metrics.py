@@ -23,9 +23,9 @@ def calculate_metrics(targets, predictions, num_classes, device):
     Returns:
         precision, recall, f1 arrays for each class
     """
-    precision = torch.zeros(num_classes).to(device)
-    recall = torch.zeros(num_classes).to(device)
-    f1 = torch.zeros(num_classes).to(device)
+    precision = torch.zeros(num_classes, device=device)
+    recall = torch.zeros(num_classes, device=device)
+    f1 = torch.zeros(num_classes, device=device)
     
     for cls in range(num_classes):
         pred_cls = (predictions == cls)
@@ -57,7 +57,7 @@ def calculate_iou_metrics(targets, predictions, num_classes, device):
         class_ious: IoU for each class
         mean_iou: Mean IoU across all classes
     """
-    class_ious = torch.zeros(num_classes).to(device)
+    class_ious = torch.zeros(num_classes, device=device)
     
     for cls in range(num_classes):
         pred_cls = (predictions == cls)
