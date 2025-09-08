@@ -14,6 +14,7 @@ import torch.optim as optim
 from monai.losses import DiceLoss, DiceCELoss, FocalLoss
 from combined_loss import CombinedLoss
 from models.ViT import create_vit_large_16
+from models.DinoV3 import DINOv3SegmentationModel
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from omegaconf import DictConfig
 from typing import Tuple
@@ -95,7 +96,21 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
         encoder_name = "ViT-Large"
 
        
-        #add NNUNet or similar
+        #TODO: check this works
+    elif model_name == "DinoV3":
+        img_size = cfg["model"]["img_size"]
+        satellite_weights_path = cfg["model"]["satellite_weights_path"]
+        segmentation_head = cfg["model"]["segmentation_head"]
+        freeze_backbone = cfg["model"]["freeze_backbone"]
+
+        model = DINOv3SegmentationModel(
+            num_classes=classes,
+            img_size=img_size,
+            satellite_weights_path=satellite_weights_path,
+            segmentation_head=segmentation_head,
+            freeze_backbone=freeze_backbone
+            )
+        encoder_name = "DINOv3-ViT-L/16"
 
     else:
         raise ValueError(f"Model {model_name} not recognized.")

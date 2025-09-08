@@ -26,6 +26,21 @@ from metrics import calculate_metrics, calculate_iou_metrics, evaluate_model
 
 log = logging.getLogger(__name__)
 
+# Add after imports - dubugging
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA device count: {torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    torch.cuda.init()
+    print(f"Current device: {torch.cuda.current_device()}")
+    print(f"Device name: {torch.cuda.get_device_name()}")
+else:
+    print("No CUDA devices found")
+
+# Check environment variables
+import os
+print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
@@ -72,6 +87,7 @@ def main(cfg: DictConfig):
     # Load the model
     print("Loading model...")
     model = load_model(cfg, device)
+    model = model.to(device)
 
     # Load loss function, optimizer, and scheduler
     loss_function = get_loss_function(cfg)

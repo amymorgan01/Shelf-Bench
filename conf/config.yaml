@@ -28,12 +28,13 @@ model:
   classes: 2
   img_size: 256
   pretrained_path: "/home/users/amorgan/benchmark_CB_AM/models/ViT-L_16.npz"
-
-
+  satellite_weights_path: "/home/users/amorgan/benchmark_CB_AM/models/dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth"
+  segmentation_head: "unet"  # "fcn", "unet", "fpn"
+  freeze_backbone: true # trains the segmentation head only
 
 # training/default.yaml
 training:
-  batch_size: 16
+  batch_size: 4
   learning_rate: 1e-4
   weight_decay: 1e-4
   epochs: 5000
