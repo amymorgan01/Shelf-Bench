@@ -67,7 +67,9 @@ def main(cfg: DictConfig):
     print(f"Using device: {device}")
 
     # save models
-    os.makedirs(cfg["save_dir"], exist_ok=True)
+    base_save_dir = cfg.save_dir
+    model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
+    os.makedirs(model_specific_dir, exist_ok=True)
     # save models with specific names
     model_name_prefix = f"{cfg['model']['name']}_bs{cfg['training']['batch_size']}"
     best_loss_model_path = os.path.join(
