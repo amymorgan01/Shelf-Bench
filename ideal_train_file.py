@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 # Add after imports - dubugging
 import torch
+
 print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"CUDA device count: {torch.cuda.device_count()}")
 if torch.cuda.is_available():
@@ -39,6 +40,7 @@ else:
 
 # Check environment variables
 import os
+
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
 
 
@@ -72,14 +74,14 @@ def main(cfg: DictConfig):
     os.makedirs(model_specific_dir, exist_ok=True)
     # save models with specific names
     model_name_prefix = f"{cfg['model']['name']}_bs{cfg['training']['batch_size']}"
-    best_loss_model_path = os.path.join(
-        cfg["save_dir"], f"{model_name_prefix}_best_loss.pth"
+    best_loss_model_path = os.path.abspath(
+        os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
     )
-    best_iou_model_path = os.path.join(
-        cfg["save_dir"], f"{model_name_prefix}_best_iou.pth"
+    best_iou_model_path = os.path.abspath(
+        os.path.join(model_specific_dir, f"{model_name_prefix}_best_iou.pth")
     )
-    checkpoint_path = os.path.join(
-        cfg["save_dir"], f"{model_name_prefix}_latest_epoch.pth"
+    checkpoint_path = os.path.abspath(
+        os.path.join(model_specific_dir, f"{model_name_prefix}_latest_epoch.pth")
     )
 
     # Get data loaders
