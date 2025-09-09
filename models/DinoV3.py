@@ -174,14 +174,14 @@ class DINOv3SegmentationModel(nn.Module):
             # Extract patch tokens (we know it's 'x_norm_patchtokens' from debug output)
             patch_features = features['x_norm_patchtokens']  # Shape: [B, N, D]
             
-            print(f"Patch features shape: {patch_features.shape}")
+            #print(f"Patch features shape: {patch_features.shape}")
             
             # Reshape to feature map
             # patch_features is [B, N, D] where N = feat_h * feat_w
             patch_features = patch_features.reshape(B, self.feat_h, self.feat_w, self.embed_dim)
             patch_features = patch_features.permute(0, 3, 1, 2)  # B, C, H, W
             
-            print(f"Reshaped patch features: {patch_features.shape}")
+            #print(f"Reshaped patch features: {patch_features.shape}")
         
         # Apply segmentation head - need to pass as list for UNet decoder
         seg_logits = self.seg_head([patch_features])  # Pass as list
