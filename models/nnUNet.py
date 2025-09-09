@@ -1,4 +1,0 @@
-"""
-nnU-Net implementation
-
-"""
