@@ -218,7 +218,7 @@ def main(cfg: DictConfig):
         # Periodic checkpoints
         if epoch % cfg.get("save_freq", 10) == 0:
             checkpoint_save_path = os.path.join(
-                cfg["save_dir"], f"model_epoch_{epoch}.pth"
+                model_specific_dir, f"{model_name_prefix}_model_epoch_{epoch}.pth"
             )
             save_model(
                 checkpoint_save_path,
