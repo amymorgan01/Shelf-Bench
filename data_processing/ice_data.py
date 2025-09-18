@@ -67,7 +67,7 @@ class IceDataset(Dataset):
                             A.RandomBrightnessContrast(
                                 brightness_limit=0.2, contrast_limit=0.2, p=1.0
                             ),
-                            A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                            A.GaussNoise()#var_limit=(10.0, 50.0), p=1.0),
                         ],
                         p=0.3,
                     ),

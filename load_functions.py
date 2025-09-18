@@ -26,6 +26,7 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
     # Load datasets
     train_dataset = IceDataset(mode="train", parent_dir=parent_dir, augment=True)
     val_dataset = IceDataset(mode="val", parent_dir=parent_dir, augment=False)
+    test_dataset = IceDataset(mode="test", parent_dir=parent_dir, augment=False)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -45,8 +46,17 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
         pin_memory=True,
         # persistent_workers=True,
     )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=cfg["training"]["batch_size"],
+        shuffle=False,
+        num_workers=cfg["num_workers"],
+        pin_memory=True,
+        # persistent_workers=True,
+    )
 
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:

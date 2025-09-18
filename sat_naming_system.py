@@ -36,17 +36,21 @@ def process_s1(filepath):
     - _crop.tif
     """
     filename = os.path.basename(filepath)
-    s1_type_match = re.search(r'(S1[AB])_EW_GRDM_1SDH', filename)
+    s1_type_match = re.search(r'(S1[AB])_EW_GRDM_1S[DS]H', filename)
     s1_type = s1_type_match.group(1) if s1_type_match else "S1A"
-    date_match = re.search(r'S1[AB]_EW_GRDM_1SDH_(\d{8})T', filename)
+    
+    date_match = re.search(r'_(\d{8})T\d{6}_', filename)
+    date_str = date_match.group(1) if date_match else "unknown_date"
 
     if date_match:
         date_str = date_match.group(1) # YYYYMMDD
     else:
         date_str = "unknown_date"
 
-    #polarisation 
+    #polarisation. TODO: check with celia for consistency here
     if '1SDH' in filename:
+        polarisation = 'HHHV'
+    elif '1SSH' in filename:
         polarisation = 'HH'
     else:
         polarisation = 'unknown_polarisation'
@@ -126,25 +130,31 @@ def process_Envisat(filepath):
     extension = os.path.splitext(filename)[1]
     return new_filename + extension
 
-def rename_files(directory, dry_run=True, csv_log_path="renamed_files_log.csv"):
+def rename_files(directory, dry_run=True, csv_log_path="renamed_testfiles_log.csv"):
     """
     Rename all satellite data files in the given directory structure according to the new naming convention.
     Set dry_run=False to actually perform the renaming.
     """
     rename_log = []
     for root, dirs, files in os.walk(directory):
+        
+        # Only process 'test_' directories, comment out for train/val
+        
+        if "test_" not in os.path.basename(root) and not any("test_" in d for d in root.split(os.sep)):
+            continue  # Skip directories that are not test directories
+        
         for file in files:
             if file.lower().startswith("readme") or file.lower() == "readme.txt":
                 continue
             filepath = os.path.join(root, file)
             new_filename = None
-            if 'Sentinel-1' in root:
+            if 'Sentinel-1' in root or 'test_s1' in root:
                 new_filename = process_s1(filepath)
-            elif 'ERS' in root:
+            elif 'ERS' in root or 'test_ERS' in root:
                 if any(file.endswith(ext) for ext in ['.shp', '.prj', '.dbf', '.shx', '.qmd', '.cpg']):
                     continue
                 new_filename = process_ERS(filepath)
-            elif 'Envisat' in root:
+            elif 'Envisat' in root or 'test_envisat' in root:
                 if any(file.endswith(ext) for ext in ['.shp', '.prj', '.dbf', '.shx', '.qmd', '.cpg']):
                     continue
                 new_filename = process_Envisat(filepath)
@@ -167,12 +177,12 @@ def rename_files(directory, dry_run=True, csv_log_path="renamed_files_log.csv"):
 if __name__ == "__main__":
     # Example usage
     # Change this to your actual directory path
-    base_directory = "/gws/nopw/j04/iecdt/amorgan/ice-bench-masks-corrected"
+    base_directory = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH"
     
     # # Do a dry run first to see what would be renamed
-    # print("Dry run - no files will be renamed:")
-    # rename_files(base_directory, dry_run=True,csv_log_path="dry_run_renamed_files_log.csv")
+    print("Dry run - no files will be renamed:")
+    rename_files(base_directory, dry_run=True,csv_log_path="dry_run_renamed_files_log.csv")
     
     # Uncomment these lines to actually perform the renaming
-    print("\nPerforming actual renaming:")
-    rename_files(base_directory, dry_run=True)
+    # print("\nPerforming actual renaming:")
+    # rename_files(base_directory, dry_run=True)

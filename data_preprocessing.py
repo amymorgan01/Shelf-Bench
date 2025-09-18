@@ -1,8 +1,8 @@
 """
 Steps involved for preprocessing the Sentinel-1, ERS and Envisat scenes:
-1. Set a naming convention: [SAT]_[YYYYMMDD]_[POLARISATION]_[EXTRA]  ⭐️
-2. Keep patches at their original res: Envisat and ERS are 30 m, Sentinel-1 is 40 m). 
- - create a val dataset with 10% of the data (some hard some easy scenes) from the training set
+1. Set a naming convention: [SAT]_[YYYYMMDD]_[POLARISATION]_[SCENE_ID] 
+2. Keep patches at their original res: Envisat and ERS are 30 m, Sentinel-1 is 40 m. 
+ - create a val dataset with 10% of the data from the training set
 3. Images are greyscale, masks are greyscale
 4. Patch the images and masks
 
@@ -25,8 +25,6 @@ BAND_MAPPING = {
     }
 }
 """
-
-#TODO: get rid of pairs w masks that are >80% background
 
 # import libraries
 import os
@@ -101,13 +99,8 @@ class SatellitePreprocessor:
         
     def _resize_image(self,image,satellite):
         """
-        IGNORE THIS FUNCTION
 
-        Resize images all to 40m resolution, sentinel-1 is already 40m, so 
-        only need to downscale ERS and Envisat images.
-
-        Inputs include image array and satellite name,
-        returns resized images
+        Option to resize
 
         """
         if satellite in ['ERS', 'Envisat']:
@@ -353,17 +346,39 @@ class SatellitePreprocessor:
             except Exception as e:
                 print(f"Error processing {img_path}: {str(e)}")
 
-    def _get_file_pairs(self, satellite_dir):
+    def _get_file_pairs(self, satellite_dir, mode="test", satellite_name=None):
         """
         Get paired image and mask files
 
         returns a list of (image_path, mask_path) tuples
+        
+        mode: "trainval" (default) or "test"
 
         """
-        scenes_dir = satellite_dir / 'scenes'
-        masks_dir = satellite_dir / 'masks'
+        
+        if mode == "trainval":
+            
+            scenes_dir = satellite_dir / 'scenes'
+            masks_dir = satellite_dir / 'masks'
+            
+        elif mode == "test":
+                # Handle satellite-specific test folder names
+            test_folder_map = {
+                "Sentinel-1": "test_s1",
+                "ERS": "test_ERS",
+                "Envisat": "test_envisat",
+            }
+            test_subdir = test_folder_map.get(satellite_name)
+            if test_subdir is None:
+                print(f"No test mapping found for {satellite_name}")
+                return []
+            scenes_dir = satellite_dir / test_subdir / "scenes"
+            masks_dir = satellite_dir / test_subdir / "masks"
+        else:
+            raise ValueError(f"Unknown mode {mode}")
+          
         if not scenes_dir.exists() or not masks_dir.exists():
-            print(f"Scenes or masks directory does not exist for {satellite_dir}")
+            print(f"Scenes or masks directory does not exist for {satellite_dir} ({mode})")
             return []
             
         image_files = list(scenes_dir.glob('*.tif'))
@@ -428,7 +443,7 @@ class SatellitePreprocessor:
         indices = np.arange(len(all_file_pairs))
         train_idx, val_idx = train_test_split(
             indices,
-            test_size= 0.15,   #this accounts roughly for after filtering blank images - TODO: check and improve this to get proper 0.1 val split
+            test_size= 0.1,   #applied after filtering blank images 
             random_state=random_seed,
             shuffle=True
         )
@@ -470,34 +485,35 @@ class SatellitePreprocessor:
                 continue
             print(f"\nProcessing {satellite} data from {sat_dir}...")
 
-            # Get file pairs for images and masks
-            file_pairs = self._get_file_pairs(sat_dir)
+            # trainval mode
 
-            if not file_pairs:
-                print(f"No valid file pairs found for {satellite}. Skipping.")
-                continue
-
-            print(f"Found {len(file_pairs)} file pairs for {satellite}.")
-
-            # Create train/val splits
-            train_pairs, val_pairs = self._create_data_splits(file_pairs)
-            print(f"Split: {len(train_pairs)} training, {len(val_pairs)} validation")
-            
-            if train_pairs:
-                thread = threading.Thread(
+            file_pairs = self._get_file_pairs(sat_dir, mode="trainval", satellite_name=satellite)
+            if file_pairs:
+                train_pairs, val_pairs = self._create_data_splits(file_pairs)
+                if train_pairs:
+                    t = threading.Thread(
+                        target=self._process_satellite_data,
+                        args=(satellite, "train", train_pairs, self.overlap_train),
+                    )
+                    all_threads.append(t)
+                    t.start()
+                if val_pairs:
+                    t = threading.Thread(
+                        target=self._process_satellite_data,
+                        args=(satellite, "val", val_pairs, self.overlap_val),
+                    )
+                    all_threads.append(t)
+                    t.start()
+                    
+            # test mode
+            test_pairs = self._get_file_pairs(sat_dir, mode="test", satellite_name=satellite)
+            if test_pairs:
+                t = threading.Thread(
                     target=self._process_satellite_data,
-                    args=(satellite, 'train', train_pairs, self.overlap_train)
+                    args=(satellite, "test", test_pairs, 0),  # no overlap for test
                 )
-                all_threads.append(thread)
-                thread.start()
-
-            if val_pairs:
-                thread = threading.Thread(
-                    target=self._process_satellite_data,
-                    args=(satellite, 'val', val_pairs, self.overlap_val)
-                )
-                all_threads.append(thread)
-                thread.start()
+                all_threads.append(t)
+                t.start()
             
         for thread in all_threads:
             thread.join()
@@ -524,8 +540,8 @@ class SatellitePreprocessor:
 
 #Main configuration 
 if __name__ == "__main__":
-    BASE_DATA_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB"
-    OUTPUT_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/preprocessed_data"
+    BASE_DATA_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH"
+    OUTPUT_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH/preprocessed_data"
     PATCH_SIZE = 256
     OVERLAP_TRAIN = 0 
     OVERLAP_VAL = 0
