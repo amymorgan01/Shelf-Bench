@@ -22,6 +22,7 @@ from load_functions import (
 )
 from train_functions import train_one_epoch, validate_with_metrics
 from metrics import calculate_metrics, calculate_iou_metrics, evaluate_model
+from torch.cuda.amp import autocast, GradScaler
 
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ def main(cfg: DictConfig):
     else:
         print("WARNING: CUDA not available, using CPU")
         cfg.device = "cpu"
+        
+    use_amp = cfg.get("use_amp", True) 
+    scaler = GradScaler() if use_amp else None
 
     # Set device
     device = torch.device(cfg.device)
