@@ -9,6 +9,7 @@ import wandb
 from omegaconf import DictConfig
 from metrics import calculate_metrics, calculate_iou_metrics
 from typing import Optional
+import gc
 
 
 def train_one_epoch(
@@ -26,6 +27,7 @@ def train_one_epoch(
     for batch_idx, (image, mask) in enumerate(
         tqdm.tqdm(train_loader, desc=f"Epoch {epoch+1}")
     ):
+        optimizer.zero_grad(set_to_none=True)
         image = image.to(device)
         mask = mask.to(device)
 
@@ -49,6 +51,9 @@ def train_one_epoch(
             log.info(
                 f"Train Epoch: {epoch+1} [{batch_idx * len(image)}/{len(train_loader.dataset)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}"
             )
+        if batch_idx % 50 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
 
     epoch_loss = running_loss / len(train_loader)
     log.info(f"Train Epoch: {epoch+1} Average Loss: {epoch_loss:.6f}")

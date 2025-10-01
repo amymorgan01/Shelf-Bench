@@ -229,19 +229,19 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
             "loss": avg_loss,
             "pixel_accuracy": pixel_accuracy,
             "mean_iou": mean_iou,
-            "class_ious": class_ious,
+            "class_ious": class_ious.tolist(),  # Convert to list for CSV compatibility
             "mean_precision": avg_precision.mean(),
             "mean_recall": avg_recall.mean(),
             "mean_f1": avg_f1.mean(),
-            "precision_per_class": avg_precision,
-            "recall_per_class": avg_recall,
-            "f1_per_class": avg_f1,
+            "precision_per_class": avg_precision.tolist(),  # Convert to list for CSV compatibility
+            "recall_per_class": avg_recall.tolist(),  # Convert to list for CSV compatibility
+            "f1_per_class": avg_f1.tolist(),  # Convert to list for CSV compatibility
             # Sklearn verification metrics (sampled)
             "sklearn_accuracy": sklearn_accuracy,
-            "sklearn_precision_per_class": sklearn_precision,
-            "sklearn_recall_per_class": sklearn_recall,
-            "sklearn_f1_per_class": sklearn_f1,
-            "sklearn_jaccard_per_class": sklearn_jaccard,
+            "sklearn_precision_per_class": sklearn_precision.tolist() if sklearn_precision is not None else None,
+            "sklearn_recall_per_class": sklearn_recall.tolist() if sklearn_recall is not None else None,
+            "sklearn_f1_per_class": sklearn_f1.tolist() if sklearn_f1 is not None else None,
+            "sklearn_jaccard_per_class": sklearn_jaccard.tolist() if sklearn_jaccard is not None else None,
         }
 
         log.info(f"Completed evaluation for {architecture} - {model_name}")
@@ -352,66 +352,147 @@ def run_testing(cfg, class_names=["Ocean", "Ice"]):
     
     # Create comprehensive results summary
     if all_results:
-        results_df = pd.DataFrame(all_results)
+        log.info(f"Processing {len(all_results)} results...")
         
-        # Save detailed results
-        results_df.to_csv("detailed_model_comparison.csv", index=False)
-        log.info("Detailed results saved to 'detailed_model_comparison.csv'")
+    
+        # Define output directory
+        output_dir = Path("/home/users/amorgan/benchmark_CB_AM/visualisation_panels")
+        output_dir.mkdir(exist_ok=True)  # Create directory if it doesn't exist
         
-        # Create summary statistics
-        summary_stats = []
-        for arch in architectures.keys():
-            arch_results = results_df[results_df['architecture'] == arch]
-            if len(arch_results) > 0:
-                summary_stats.append({
-                    'architecture': arch,
-                    'num_models': len(arch_results),
-                    'mean_iou_avg': arch_results['mean_iou'].mean(),
-                    'mean_iou_std': arch_results['mean_iou'].std(),
-                    'pixel_accuracy_avg': arch_results['pixel_accuracy'].mean(),
-                    'pixel_accuracy_std': arch_results['pixel_accuracy'].std(),
-                    'mean_f1_avg': arch_results['mean_f1'].mean(),
-                    'mean_f1_std': arch_results['mean_f1'].std(),
-                    'best_model': arch_results.loc[arch_results['mean_iou'].idxmax(), 'model_name'],
-                    'best_iou': arch_results['mean_iou'].max()
-                })
+        # Define output files with full paths
+        all_detailed_csv = output_dir / f"detailed_model_comparison.csv"
+        all_summary_csv = output_dir / f"architecture_summary.csv"
         
-        summary_df = pd.DataFrame(summary_stats)
-        summary_df.to_csv("architecture_summary.csv", index=False)
-        log.info("Summary results saved to 'architecture_summary.csv'")
+        try:
+            # Create DataFrame with proper handling of numpy arrays
+            results_df = pd.DataFrame(all_results)
+            
+            # Save detailed results with explicit error handling
+            log.info(f"Saving detailed results to: {all_detailed_csv}")
+            results_df.to_csv(all_detailed_csv, index=False)
+            log.info(f"✓ Detailed results saved successfully to '{all_detailed_csv}'")
+            
+            # Create summary statistics
+            summary_stats = []
+            for arch in architectures.keys():
+                arch_results = results_df[results_df['architecture'] == arch]
+                if len(arch_results) > 0:
+                    summary_stats.append({
+                        'architecture': arch,
+                        'num_models': len(arch_results),
+                        'mean_iou_avg': arch_results['mean_iou'].mean(),
+                        'mean_iou_std': arch_results['mean_iou'].std(),
+                        'pixel_accuracy_avg': arch_results['pixel_accuracy'].mean(),
+                        'pixel_accuracy_std': arch_results['pixel_accuracy'].std(),
+                        'mean_f1_avg': arch_results['mean_f1'].mean(),
+                        'mean_f1_std': arch_results['mean_f1'].std(),
+                        'best_model': arch_results.loc[arch_results['mean_iou'].idxmax(), 'model_name'],
+                        'best_iou': arch_results['mean_iou'].max()
+                    })
         
-        # Print summary to console
-        print("\n" + "="*80)
-        print("ARCHITECTURE COMPARISON SUMMARY")
-        print("="*80)
-        print(summary_df.round(4))
-        
-        # Print best model overall
-        best_model_idx = results_df['mean_iou'].idxmax()
-        best_model = results_df.loc[best_model_idx]
-        print(f"\nBEST MODEL OVERALL:")
-        print(f"Architecture: {best_model['architecture']}")
-        print(f"Model: {best_model['model_name']}")
-        print(f"Mean IoU: {best_model['mean_iou']:.4f}")
-        print(f"Pixel Accuracy: {best_model['pixel_accuracy']:.4f}")
-        print(f"Mean F1: {best_model['mean_f1']:.4f}")
-        
-        # Print class-wise performance for best model
-        print(f"\nCLASS-WISE PERFORMANCE (Best Model):")
-        for i, class_name in enumerate(class_names):
-            print(f"{class_name}:")
-            print(f"  IoU: {best_model['class_ious'][i]:.4f}")
-            print(f"  Precision: {best_model['precision_per_class'][i]:.4f}")
-            print(f"  Recall: {best_model['recall_per_class'][i]:.4f}")
-            print(f"  F1: {best_model['f1_per_class'][i]:.4f}")
+            # Save summary with error handling
+            if summary_stats:
+                summary_df = pd.DataFrame(summary_stats)
+                log.info(f"Saving summary results to: {all_summary_csv}")
+                summary_df.to_csv(all_summary_csv, index=False)
+                log.info(f"✓ Summary results saved successfully to '{all_summary_csv}'")
+
+                # Print summary to console
+                print("\n" + "="*80)
+                print("ARCHITECTURE COMPARISON SUMMARY")
+                print("="*80)
+                print(summary_df.round(4))
+            else:
+                log.warning("No summary statistics to save")
+                    
+        except Exception as e:
+            log.error(f"Error saving CSV files: {str(e)}")
+            log.info("Attempting to save with alternative method...")
+            
+            try:
+                # Alternative save method with explicit encoding
+                results_df.to_csv(str(all_detailed_csv), index=False, encoding='utf-8')
+                log.info(f"✓ Alternative save successful for detailed results")
+                
+                if summary_stats:
+                    summary_df = pd.DataFrame(summary_stats)
+                    summary_df.to_csv(str(all_summary_csv), index=False, encoding='utf-8')
+                    log.info(f"✓ Alternative save successful for summary results")
+                    
+            except Exception as e2:
+                log.error(f"Alternative save method also failed: {str(e2)}")
+                log.info("Printing results to console instead...")
+                
+                print("\n" + "="*80)
+                print("DETAILED RESULTS (CSV save failed)")
+                print("="*80)
+                print(results_df.to_string())
+                
+                
+        # Print best model overall (if we have results)
+        if len(results_df) > 0:
+            best_model_idx = results_df['mean_iou'].idxmax()
+            best_model = results_df.loc[best_model_idx]
+            print(f"\nBEST MODEL OVERALL:")
+            print(f"Architecture: {best_model['architecture']}")
+            print(f"Model: {best_model['model_name']}")
+            print(f"Mean IoU: {best_model['mean_iou']:.4f}")
+            print(f"Pixel Accuracy: {best_model['pixel_accuracy']:.4f}")
+            print(f"Mean F1: {best_model['mean_f1']:.4f}")
+            
+            # Print class-wise performance for best model
+            print(f"\nCLASS-WISE PERFORMANCE (Best Model):")
+            class_ious = best_model['class_ious']
+            precision_per_class = best_model['precision_per_class']
+            recall_per_class = best_model['recall_per_class']
+            f1_per_class = best_model['f1_per_class']
+            
+            for i, class_name in enumerate(class_names):
+                print(f"{class_name}:")
+                print(f"  IoU: {class_ious[i]:.4f}")
+                print(f"  Precision: {precision_per_class[i]:.4f}")
+                print(f"  Recall: {recall_per_class[i]:.4f}")
+                print(f"  F1: {f1_per_class[i]:.4f}")
+    else:
+        log.warning("No results to save - all model evaluations failed")
     
     # Report failed models
     if failed_models:
         log.warning(f"Failed to evaluate {len(failed_models)} models:")
         for failed_model in failed_models:
             log.warning(f"  - {failed_model}")
+    #     # Print summary to console
+    #     print("\n" + "="*80)
+    #     print("ARCHITECTURE COMPARISON SUMMARY")
+    #     print("="*80)
+    #     print(summary_df.round(4))
+        
+    #     # Print best model overall
+    #     best_model_idx = results_df['mean_iou'].idxmax()
+    #     best_model = results_df.loc[best_model_idx]
+    #     print(f"\nBEST MODEL OVERALL:")
+    #     print(f"Architecture: {best_model['architecture']}")
+    #     print(f"Model: {best_model['model_name']}")
+    #     print(f"Mean IoU: {best_model['mean_iou']:.4f}")
+    #     print(f"Pixel Accuracy: {best_model['pixel_accuracy']:.4f}")
+    #     print(f"Mean F1: {best_model['mean_f1']:.4f}")
+        
+    #     # Print class-wise performance for best model
+    #     print(f"\nCLASS-WISE PERFORMANCE (Best Model):")
+    #     for i, class_name in enumerate(class_names):
+    #         print(f"{class_name}:")
+    #         print(f"  IoU: {best_model['class_ious'][i]:.4f}")
+    #         print(f"  Precision: {best_model['precision_per_class'][i]:.4f}")
+    #         print(f"  Recall: {best_model['recall_per_class'][i]:.4f}")
+    #         print(f"  F1: {best_model['f1_per_class'][i]:.4f}")
     
-    log.info("\nTesting completed!")
+    # # Report failed models
+    # if failed_models:
+    #     log.warning(f"Failed to evaluate {len(failed_models)} models:")
+    #     for failed_model in failed_models:
+    #         log.warning(f"  - {failed_model}")
+    
+    # log.info("\nTesting completed!")
     
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg):
