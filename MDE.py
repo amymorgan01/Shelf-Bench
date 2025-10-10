@@ -5,7 +5,6 @@ We use our segmentation masks to derive the front line.
 
 Code inspired by Gourmelen et al. (2022)
 """
-
 import os
 import gc
 import numpy as np
@@ -13,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
-from scipy.ndimage import binary_erosion, binary_dilation
+from scipy.ndimage import binary_erosion, binary_dilation, binary_opening, binary_closing
 from scipy.spatial.distance import directed_hausdorff, cdist
 import cv2
 from collections import defaultdict
@@ -21,7 +20,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import logging
 from omegaconf import DictConfig, OmegaConf
-
+from load_functions import load_model
 
 @dataclass
 class ModelSpec:
@@ -81,27 +80,88 @@ def normalize_mask_to_2d(mask: np.ndarray, name: str = "mask") -> np.ndarray:
     return mask.astype(np.uint8)
 
 
-def extract_boundary_contour_v2(mask: np.ndarray) -> Optional[np.ndarray]:
+def apply_morphological_filter(mask: np.ndarray, 
+                               operation: str = 'opening',
+                               iterations: int = 2,
+                               structure: Optional[np.ndarray] = None) -> np.ndarray:
     """
-    Extract boundary using contour detection with robust preprocessing.
+    Apply morphological filtering to clean up mask predictions.
+    
+    Args:
+        mask: Binary mask (H, W) with values 0 or 1
+        operation: 'erosion', 'dilation', 'opening', 'closing'
+        iterations: Number of iterations to apply
+        structure: Structuring element (default: 3x3 cross)
+    
+    Returns:
+        Filtered binary mask
+    """
+    if structure is None:
+        # Default: 3x3 cross-shaped structuring element
+        structure = np.array([[0, 1, 0],
+                             [1, 1, 1],
+                             [0, 1, 0]], dtype=np.uint8)
+    
+    mask_binary = (mask > 0).astype(np.uint8)
+    
+    if operation == 'erosion':
+        filtered = binary_erosion(mask_binary, structure=structure, iterations=iterations)
+    elif operation == 'dilation':
+        filtered = binary_dilation(mask_binary, structure=structure, iterations=iterations)
+    elif operation == 'opening':
+        # Opening = erosion followed by dilation (removes small bright spots)
+        filtered = binary_opening(mask_binary, structure=structure, iterations=iterations)
+    elif operation == 'closing':
+        # Closing = dilation followed by erosion (fills small dark holes)
+        filtered = binary_closing(mask_binary, structure=structure, iterations=iterations)
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
+    
+    return filtered.astype(np.uint8)
+
+
+def extract_boundary_contour_v2(mask: np.ndarray,
+                                morphological_filter: bool = True,
+                                filter_operation: str = 'opening',
+                                filter_iterations: int = 2,
+                                min_contour_length: int = 50) -> Optional[np.ndarray]:
+    """
+    Enhanced boundary extraction with optional morphological filtering.
     
     Args:
         mask: Binary mask (any shape/dtype)
+        morphological_filter: Whether to apply morphological filtering
+        filter_operation: Type of morphological operation
+        filter_iterations: Number of filtering iterations
+        min_contour_length: Minimum contour length to keep
     
     Returns:
         Nx2 array of boundary coordinates, or None if no boundary exists
     """
     # Normalize to 2D uint8
     try:
-        binary_mask = normalize_mask_to_2d(mask, "extract_boundary_contour")
+        binary_mask = normalize_mask_to_2d(mask, "extract_boundary_contour_v2")
     except ValueError as e:
         print(f"Warning: {e}")
         return None
     
-    # Check if boundary exists (not all ice or all ocean)
+    # Check if boundary exists
     unique_vals = np.unique(binary_mask)
     if len(unique_vals) < 2:
-        return None  # All same value, no boundary
+        return None
+    
+    # Apply morphological filtering if requested
+    if morphological_filter:
+        binary_mask = apply_morphological_filter(
+            binary_mask, 
+            operation=filter_operation,
+            iterations=filter_iterations
+        )
+        
+        # Check again after filtering
+        unique_vals = np.unique(binary_mask)
+        if len(unique_vals) < 2:
+            return None
     
     # Scale to 0-255 if needed
     if binary_mask.max() == 1:
@@ -112,13 +172,23 @@ def extract_boundary_contour_v2(mask: np.ndarray) -> Optional[np.ndarray]:
     
     try:
         # Find contours
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours, _ = cv2.findContours(
+            binary_mask, 
+            cv2.RETR_EXTERNAL, 
+            cv2.CHAIN_APPROX_NONE
+        )
         
         if len(contours) == 0:
             return None
         
+        # Filter by minimum length
+        valid_contours = [c for c in contours if len(c) >= min_contour_length]
+        
+        if len(valid_contours) == 0:
+            return None
+        
         # Use the longest contour (main ice front)
-        longest_contour = max(contours, key=len)
+        longest_contour = max(valid_contours, key=len)
         
         # Reshape from (N, 1, 2) to (N, 2)
         boundary_coords = longest_contour.squeeze()
@@ -133,26 +203,30 @@ def extract_boundary_contour_v2(mask: np.ndarray) -> Optional[np.ndarray]:
         return boundary_coords
     
     except cv2.error as e:
-        print(f"OpenCV error in extract_boundary_contour: {e}")
-        print(f"  Input shape: {mask.shape}, dtype: {mask.dtype}")
-        print(f"  Normalized shape: {binary_mask.shape}, dtype: {binary_mask.dtype}")
-        print(f"  Values: min={binary_mask.min()}, max={binary_mask.max()}")
+        print(f"OpenCV error in extract_boundary_contour_v2: {e}")
         return None
 
 
-def extract_boundary_from_mask_v2(mask: np.ndarray, boundary_width: int = 1) -> Optional[np.ndarray]:
+def extract_boundary_from_mask_v2(mask: np.ndarray, 
+                                  boundary_width: int = 1,
+                                  morphological_filter: bool = True,
+                                  filter_operation: str = 'opening',
+                                  filter_iterations: int = 2) -> Optional[np.ndarray]:
     """
-    Extract boundary using erosion with robust preprocessing.
+    Enhanced erosion-based boundary extraction with morphological filtering.
     
     Args:
         mask: Binary mask where 1=ice, 0=ocean
         boundary_width: Width of the boundary in pixels
+        morphological_filter: Whether to apply morphological filtering
+        filter_operation: Type of morphological operation
+        filter_iterations: Number of filtering iterations
     
     Returns:
         Nx2 array of boundary coordinates, or None if no boundary exists
     """
     try:
-        binary_mask = normalize_mask_to_2d(mask, "extract_boundary_from_mask")
+        binary_mask = normalize_mask_to_2d(mask, "extract_boundary_from_mask_v2")
     except ValueError as e:
         print(f"Warning: {e}")
         return None
@@ -161,6 +235,19 @@ def extract_boundary_from_mask_v2(mask: np.ndarray, boundary_width: int = 1) -> 
     unique_vals = np.unique(binary_mask)
     if len(unique_vals) < 2:
         return None
+    
+    # Apply morphological filtering if requested
+    if morphological_filter:
+        binary_mask = apply_morphological_filter(
+            binary_mask,
+            operation=filter_operation,
+            iterations=filter_iterations
+        )
+        
+        # Check again after filtering
+        unique_vals = np.unique(binary_mask)
+        if len(unique_vals) < 2:
+            return None
     
     # Erosion-based boundary detection
     eroded = binary_erosion(binary_mask, iterations=boundary_width)
@@ -173,6 +260,7 @@ def extract_boundary_from_mask_v2(mask: np.ndarray, boundary_width: int = 1) -> 
         return None
     
     return boundary_coords.astype(np.float32)
+
 
 def calculate_boundary_distance(pred_boundary: np.ndarray, 
                                 gt_boundary: np.ndarray,
@@ -240,21 +328,27 @@ def get_satellite_resolution(filename: str) -> float:
         return 30.0
 
 
-def evaluate_mde_from_masks(pred_masks: np.ndarray,
-                            gt_masks: np.ndarray,
-                            filenames: List[str],
-                            metric: str = 'mean',
-                            boundary_method: str = 'contour',
-                            verbose: bool = True) -> Tuple[List[float], List[str]]:
+def evaluate_mde_with_filtering(pred_masks: np.ndarray,
+                                gt_masks: np.ndarray,
+                                filenames: List[str],
+                                metric: str = 'mean',
+                                boundary_method: str = 'contour',
+                                apply_morphological: bool = True,
+                                filter_operation: str = 'opening',
+                                filter_iterations: int = 2,
+                                verbose: bool = True) -> Tuple[List[float], List[str]]:
     """
-    Evaluate MDE for a batch of predictions.
+    Evaluate MDE with optional morphological filtering.
     
     Args:
         pred_masks: (N, H, W) array of predicted masks
         gt_masks: (N, H, W) array of ground truth masks
-        filenames: List of filenames for each sample
-        metric: Distance metric to use
+        filenames: List of filenames
+        metric: Distance metric ('mean', 'median', 'hausdorff')
         boundary_method: 'contour' or 'erosion'
+        apply_morphological: Whether to apply morphological filtering
+        filter_operation: 'opening', 'closing', 'erosion', 'dilation'
+        filter_iterations: Number of filter iterations
         verbose: Print progress
     
     Returns:
@@ -264,10 +358,29 @@ def evaluate_mde_from_masks(pred_masks: np.ndarray,
     valid_filenames = []
     skipped_count = 0
     
-    boundary_fn = extract_boundary_contour_v2 if boundary_method == 'contour' else extract_boundary_from_mask_v2
+    # Select boundary extraction function with filtering
+    if boundary_method == 'contour':
+        def boundary_fn(mask):
+            return extract_boundary_contour_v2(
+                mask,
+                morphological_filter=apply_morphological,
+                filter_operation=filter_operation,
+                filter_iterations=filter_iterations
+            )
+    else:
+        def boundary_fn(mask):
+            return extract_boundary_from_mask_v2(
+                mask,
+                morphological_filter=apply_morphological,
+                filter_operation=filter_operation,
+                filter_iterations=filter_iterations
+            )
     
     if verbose:
-        print(f"Processing {len(pred_masks)} patches...")
+        filter_status = "WITH" if apply_morphological else "WITHOUT"
+        print(f"Processing {len(pred_masks)} patches {filter_status} morphological filtering...")
+        if apply_morphological:
+            print(f"  Filter: {filter_operation}, iterations: {filter_iterations}")
     
     for i in range(len(pred_masks)):
         if verbose and (i + 1) % 500 == 0:
@@ -282,26 +395,33 @@ def evaluate_mde_from_masks(pred_masks: np.ndarray,
             skipped_count += 1
             continue
         
-        # Get resolution from filename
+        # Get resolution and calculate distance
         pixel_res = get_satellite_resolution(filenames[i])
-        
-        # Calculate distance
-        distance = calculate_boundary_distance(pred_boundary, gt_boundary, pixel_res, metric)
+        distance = calculate_boundary_distance(
+            pred_boundary, 
+            gt_boundary, 
+            pixel_res, 
+            metric
+        )
         
         if not np.isnan(distance):
             distances.append(distance)
             valid_filenames.append(filenames[i])
     
     if verbose:
-        print(f"\nCompleted: {len(distances)} valid patches, {skipped_count} skipped (no boundary)")
+        print(f"\nCompleted: {len(distances)} valid patches, "
+              f"{skipped_count} skipped (no boundary)")
     
     return distances, valid_filenames
 
 
+# Keep all your existing functions (extract_metadata_from_filename, calculate_mde_with_subsets, 
+# visualize_boundaries, build_model_specs, prepare_device, load_models, process_mask) unchanged...
+
+# [Rest of your existing functions remain the same - I'm not repeating them to save space]
+
 def extract_metadata_from_filename(filename: str) -> Dict[str, str]:
-    """
-    Extract metadata from filename.
-    """
+    """Extract metadata from filename."""
     basename = os.path.splitext(filename)[0]
     
     metadata = {
@@ -326,14 +446,9 @@ def calculate_mde_with_subsets(pred_masks: np.ndarray,
                                gt_masks: np.ndarray,
                                filenames: List[str],
                                metric: str = 'mean') -> Dict[str, Dict[str, float]]:
-    """
-    Calculate MDE overall and for various subsets (satellite).
-    
-    Returns:
-        Dictionary with results for each subset
-    """
-    # Calculate distances for all samples
-    distances, valid_filenames = evaluate_mde_from_masks(
+    """Calculate MDE overall and for various subsets (satellite)."""
+    # Use the new filtering-enabled function
+    distances, valid_filenames = evaluate_mde_with_filtering(
         pred_masks, gt_masks, filenames, metric
     )
     
@@ -376,18 +491,12 @@ def visualize_boundaries(image: np.ndarray,
                         filename: str,
                         save_dir: str,
                         boundary_method: str = 'contour'):
-    """
-    Visualize ground truth and predicted boundaries for multiple models.
-    
-    Args:
-        image: Original image (H, W) or (H, W, C)
-        gt_mask: Ground truth mask (H, W)
-        pred_masks: Dictionary of {model_name: predicted_mask}
-        filename: Filename for saving
-        save_dir: Directory to save visualization
-        boundary_method: Method to extract boundaries
-    """
-    boundary_fn = extract_boundary_contour_v2 if boundary_method == 'contour' else extract_boundary_from_mask_v2
+    """Visualize ground truth and predicted boundaries for multiple models."""
+    # Use the enhanced boundary extraction with filtering
+    if boundary_method == 'contour':
+        boundary_fn = lambda mask: extract_boundary_contour_v2(mask, morphological_filter=True)
+    else:
+        boundary_fn = lambda mask: extract_boundary_from_mask_v2(mask, morphological_filter=True)
     
     # Extract GT boundary
     gt_boundary = boundary_fn(gt_mask)
@@ -492,8 +601,8 @@ def load_models(model_specs: List[ModelSpec], cfg: DictConfig, device: torch.dev
             cfg_copy = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
             cfg_copy.model.name = spec.arch
             
-            # Load model to CPU first - PASS DEVICE HERE
-            model = load_model(cfg_copy, torch.device('cpu'))  # ✓ Fixed: passing device
+            # Load model to CPU first
+            model = load_model(cfg_copy, torch.device('cpu'))
             
             # Load checkpoint
             ckpt = torch.load(spec.ckpt_path, map_location='cpu', weights_only=False)
@@ -532,14 +641,19 @@ def process_mask(masks: torch.Tensor) -> torch.Tensor:
         masks = masks.squeeze(1)
     masks = 1 - masks
     return masks.long()
+
+
 def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
                                             test_loader: DataLoader,
                                             device: torch.device,
                                             output_dir: str = './results',
                                             visualize_samples: int = 20,
-                                            save_per_patch: bool = True) -> Dict[str, Dict]:
+                                            save_per_patch: bool = True,
+                                            apply_morphological_filter: bool = True,
+                                            filter_operation: str = 'opening',
+                                            filter_iterations: int = 2) -> Dict[str, Dict]:
     """
-    Single-pass streaming evaluation to avoid DataLoader iteration issues.
+    Single-pass streaming evaluation with morphological filtering options.
     """
     all_results = {}
     
@@ -554,9 +668,11 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
         all_filenames = [f"sample_{i}" for i in range(len(test_loader.dataset))]
     
     print(f"Found {len(all_filenames)} files in dataset")
-    print(f"Sample filenames: {all_filenames[:5]}")
+    print(f"Morphological filtering: {'ENABLED' if apply_morphological_filter else 'DISABLED'}")
+    if apply_morphological_filter:
+        print(f"  Operation: {filter_operation}, iterations: {filter_iterations}")
     
-    # Process each model sequentially - SINGLE PASS ONLY
+    # Process each model sequentially
     for model_idx, (model_name, model) in enumerate(models.items(), 1):
         print(f"\n{'='*70}")
         print(f"Processing {model_idx}/{len(models)}: {model_name}")
@@ -596,18 +712,10 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
                 pred_masks_np = (torch.sigmoid(outputs) > 0.5).cpu().numpy()
                 masks_np = process_mask(masks).cpu().numpy()
                 
-                # Debug first batch of first model
-                if batch_idx == 0 and model_idx == 1:
-                    print(f"DEBUG: pred_masks_np shape: {pred_masks_np.shape}, dtype: {pred_masks_np.dtype}")
-                    print(f"DEBUG: masks_np shape: {masks_np.shape}, dtype: {masks_np.dtype}")
-                    print(f"DEBUG: Sample filenames: {batch_filenames[:3]}")
-                
-                # Handle model output shape - fix the 2-class output
-                if pred_masks_np.shape[1] == 2:  # Binary segmentation with 2 classes
-                    # Take class 1 (ice class) predictions
-                    pred_masks_np = pred_masks_np[:, 1, :, :]  # Now shape: (batch, height, width)
+                # Handle model output shape
+                if pred_masks_np.shape[1] == 2:
+                    pred_masks_np = pred_masks_np[:, 1, :, :]
                 elif pred_masks_np.shape[1] == 1:
-                    # Single class output, squeeze channel dimension
                     pred_masks_np = pred_masks_np.squeeze(1)
                 
                 # Process each sample in batch
@@ -615,22 +723,31 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
                 
                 for i in range(actual_batch_size):
                     # Extract single sample masks
-                    if pred_masks_np.ndim == 3:  # (batch, height, width)
+                    if pred_masks_np.ndim == 3:
                         pred_mask = pred_masks_np[i]
-                    else:  # Single sample
+                    else:
                         pred_mask = pred_masks_np
                     
-                    if masks_np.ndim == 3:  # (batch, height, width)
+                    if masks_np.ndim == 3:
                         gt_mask = masks_np[i]
-                    else:  # Single sample
+                    else:
                         gt_mask = masks_np
                     
-                    # Use the filename
                     filename = batch_filenames[i]
                     
-                    # Extract boundaries
-                    pred_boundary = extract_boundary_contour_v2(pred_mask)
-                    gt_boundary = extract_boundary_contour_v2(gt_mask)
+                    # Extract boundaries with morphological filtering
+                    pred_boundary = extract_boundary_contour_v2(
+                        pred_mask,
+                        morphological_filter=apply_morphological_filter,
+                        filter_operation=filter_operation,
+                        filter_iterations=filter_iterations
+                    )
+                    gt_boundary = extract_boundary_contour_v2(
+                        gt_mask,
+                        morphological_filter=apply_morphological_filter,
+                        filter_operation=filter_operation,
+                        filter_iterations=filter_iterations
+                    )
                     
                     if pred_boundary is None or gt_boundary is None:
                         continue
@@ -694,6 +811,11 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
             with open(os.path.join(model_dir, 'mde_summary.txt'), 'w') as f:
                 f.write(f"MDE Evaluation Summary for {model_name}\n")
                 f.write(f"{'='*50}\n\n")
+                f.write(f"Morphological filtering: {'ENABLED' if apply_morphological_filter else 'DISABLED'}\n")
+                if apply_morphological_filter:
+                    f.write(f"Filter operation: {filter_operation}\n")
+                    f.write(f"Filter iterations: {filter_iterations}\n")
+                f.write(f"\nResults:\n")
                 f.write(f"overall:\n")
                 for metric_name, value in results['overall'].items():
                     if metric_name == 'n_samples':
@@ -712,6 +834,11 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
     with open(os.path.join(output_dir, 'model_comparison.txt'), 'w') as f:
         f.write("Model Comparison Summary\n")
         f.write("="*70 + "\n\n")
+        f.write(f"Morphological filtering: {'ENABLED' if apply_morphological_filter else 'DISABLED'}\n")
+        if apply_morphological_filter:
+            f.write(f"Filter operation: {filter_operation}\n")
+            f.write(f"Filter iterations: {filter_iterations}\n")
+        f.write("\n")
         
         f.write(f"{'Model':<20} {'Mean MDE (m)':<15} {'Std Dev (m)':<15} {'Median (m)':<15} {'N Patches':<10}\n")
         f.write("-" * 75 + "\n")
@@ -726,10 +853,10 @@ def run_multi_model_mde_evaluation_streaming(models: Dict[str, torch.nn.Module],
     print(f"\n✓ All results saved to {output_dir}")
     return all_results
 
-# Update the main section to use the new function:
+
+# Main section - same as before but with morphological filtering options
 if __name__ == "__main__":
     from data_processing.ice_data import IceDataset
-    from load_functions import load_model
     
     # Configuration
     parent_dir = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH"
@@ -778,13 +905,16 @@ if __name__ == "__main__":
         pin_memory=True
     )
     
-    # Use memory-efficient sequential evaluation
+    # Use memory-efficient sequential evaluation with morphological filtering
     results = run_multi_model_mde_evaluation_streaming(
         models, 
         test_loader, 
         device,
         output_dir='./mde_results',
-        visualize_samples=20
+        visualize_samples=20,
+        apply_morphological_filter=True,    # Enable morphological filtering
+        filter_operation='opening',         # Use opening (removes noise)
+        filter_iterations=2                 # Number of iterations
     )
     
     print("\n" + "="*70)
