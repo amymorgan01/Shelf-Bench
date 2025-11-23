@@ -1,5 +1,5 @@
 # Shelf-Bench dataset repository 🇦🇶
-![Description](figures/antarctica_dataset_fig.png)
+![Description](antarctica_dataset_fig.png)
 ## Dataset Information
 **Dataset provided by:** C. Baumhoer, DLR  
 Download the Shelf-Bench dataset from: https://zenodo.org/records/17610871
