@@ -8,8 +8,23 @@ Link to the original paper:
 
 Our trained models are stored in the trained_models.zip
 ---
+## 1. Create a virtual environment and install requirements.txt into your virtual environment
 
-## 1. Preprocess all images and masks
+With python
+```
+python3 -m venv .venv
+source .venv/bin/activate
+```
+Or with uv
+```
+uv venv
+source .venv/bin/activate
+```
+```
+pip install -r requirements.txt
+```
+
+## 2. Preprocess all images and masks
 
 ```
 python data_preprocessing.py
@@ -19,7 +34,7 @@ or
 uv data_preprocessing.py
 ```
 
-## 2. Apply trained_models to the Shelf-Bench dataset, or train from scratch using:
+## 3. Apply trained_models to the Shelf-Bench dataset, or train from scratch using:
 
 ```
 python ideal_train_file.py -m model.name=CHOOSE MODELS training.loss_function=CHOOSE LOSS FUNCTIONS
