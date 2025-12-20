@@ -28,6 +28,18 @@ log = logging.getLogger(__name__)
 
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
 
+# continuous wandb training from previous runs
+# model_run_ids = {
+#     "FPN": "f9nhdf5r",
+#     "Unet": "tsab9f1v",
+#     "DeepLabV3": "isst5072",
+#     "DinoV3": "1ycmbstp",
+#     "ViT": "g2gdkxkp"
+#     }
+
+# training from new wandb run
+model_run_ids = None
+
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
 
@@ -37,8 +49,15 @@ def main(cfg: DictConfig):
 
     # Set random seed
     set_seed(cfg["seed"])
-    init_wandb(cfg)
+    job_id = None
+    if model_run_ids is not None:
+        job_id = model_run_ids.get(cfg.model.name)
+
+    init_wandb(cfg, job_id=job_id)
     print("wandb init done")
+    print(60*"=")
+    print(f"model name: {cfg.model.name}, job_id: {job_id}")
+    print(60*"=")
 
     # Force CUDA device if available
     if torch.cuda.is_available():
@@ -58,14 +77,16 @@ def main(cfg: DictConfig):
     model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
     os.makedirs(model_specific_dir, exist_ok=True)
     # save models with specific names
-    model_name_prefix = f"{cfg['model']['name']}_retrain"
+    model_name_prefix = f"{cfg['model']['name']}_retrain_181225"
     best_loss_model_path = os.path.abspath(
         os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
     )
     best_iou_model_path = os.path.abspath(
         os.path.join(model_specific_dir, f"{model_name_prefix}_best_iou.pth")
     )
-
+    metric_path = os.path.abspath(
+        os.path.join(model_specific_dir, f"{model_name_prefix}_metrics.csv")
+    )
 
     checkpoint_path = os.path.abspath(
         os.path.join(model_specific_dir, f"{model_name_prefix}_latest_epoch.pth")
@@ -154,7 +175,7 @@ def main(cfg: DictConfig):
         if cfg.get("use_wandb", False):
             wandb_metrics = {
                 "epoch": epoch,
-                "train_loss": train_loss,
+                "train_epoch_loss": train_loss,
                 "val_loss": val_loss,
                 "val_mean_iou": val_iou,
                 "val_mean_precision": val_metrics["mean_precision"],
@@ -162,6 +183,18 @@ def main(cfg: DictConfig):
                 "val_mean_f1": val_metrics["mean_f1"],
             }
             wandb.log(wandb_metrics)
+            
+        if os.path.exists(metric_path):
+            with open(metric_path, "a") as f:
+                f.write(
+                    f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
+                )
+        else:
+            with open(metric_path, "w") as f:
+                f.write("epoch,train_loss,val_loss,val_iou\n")
+                f.write(
+                    f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
+                )
 
         # Track saved a best model this epoch
         saved_best_model = False

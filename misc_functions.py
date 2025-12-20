@@ -1,5 +1,6 @@
 
 import random
+from typing import Optional
 import numpy as np
 import torch
 import wandb
@@ -20,7 +21,7 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
-def init_wandb(cfg: DictConfig):
+def init_wandb(cfg: DictConfig, job_id: Optional[str] = None):
     if wandb.run is None:
         wandb.init(
             project="Shelf-Bench", 
@@ -28,6 +29,8 @@ def init_wandb(cfg: DictConfig):
             entity="amy-morgan-university-of-oxford", #change to your wandb username
             settings=wandb.Settings(start_method="thread"),
             job_type="training",
+            id=job_id,
+            resume="allow",
             save_code=False,
             config=OmegaConf.to_container(cfg, resolve=True),
         )
