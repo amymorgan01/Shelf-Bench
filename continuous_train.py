@@ -15,6 +15,7 @@ from misc_functions import set_seed, init_wandb, save_model
 from load_functions import (
     get_data_loaders,
     load_model,
+    update_segmentation_head_weights_only,
     get_optimizer,
     get_scheduler,
     get_loss_function,
@@ -22,11 +23,100 @@ from load_functions import (
 from train_functions import train_one_epoch, validate_with_metrics
 from metrics import evaluate_model
 from torch.cuda.amp import autocast, GradScaler
+import numpy as np
+from torchvision.utils import make_grid
+import torchvision.transforms.functional as TF
+from PIL import Image
+
 
 
 log = logging.getLogger(__name__)
 
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+
+# continuous wandb training from previous runs
+# model_run_ids = {
+#     "FPN": "f9nhdf5r",
+#     "Unet": "tsab9f1v",
+#     "DeepLabV3": "isst5072",
+#     "DinoV3": "1ycmbstp",
+#     "ViT": "g2gdkxkp"
+#     }
+
+# training from new wandb run
+model_run_ids = None
+
+
+
+def log_visualisations_to_wandb(model, val_loader, device, num_samples=2, denormalise=True):
+    """Log sample predictions to wandb for visualization.
+    
+    Args:
+        model: The trained model
+        val_loader: Validation data loader
+        device: Device to run inference on
+        num_samples: Number of samples to visualize (default: 2 for memory efficiency with 5 models)
+        denormalize: Whether to denormalize images (set to False if not using ImageNet normalization)
+    """
+    model.eval()
+    images_to_log = []
+    
+    with torch.no_grad():
+        for images, masks in val_loader:
+            images = images.to(device)
+            masks = masks.to(device)
+            
+            outputs = model(images)
+            if isinstance(outputs, dict):
+                outputs = outputs['out']
+
+            preds = torch.argmax(outputs, dim=1)
+            
+            images = images[:num_samples].cpu()
+            masks = masks[:num_samples].cpu()
+            preds = preds[:num_samples].cpu()
+            
+            for i in range(min(num_samples, len(images))):
+                img = images[i]
+                
+                # Denormalise image if needed (vals vased on ImageNet)
+                if denormalise:
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                    img = img * std + mean
+                
+                img = torch.clamp(img, 0, 1)
+                
+                # Convert mask and prediction to RGB for visualisation
+                # Class 0 = black, Class 1 = white
+                mask_vis = masks[i].float().unsqueeze(0).repeat(3, 1, 1)
+                pred_vis = preds[i].float().unsqueeze(0).repeat(3, 1, 1)
+                
+                # Log to wandb
+                images_to_log.append(
+                    wandb.Image(
+                        img,
+                        caption=f"Sample {i+1}: Image"
+                    )
+                )
+                images_to_log.append(
+                    wandb.Image(
+                        mask_vis,
+                        caption=f"Sample {i+1}: Ground Truth"
+                    )
+                )
+                images_to_log.append(
+                    wandb.Image(
+                        pred_vis,
+                        caption=f"Sample {i+1}: Prediction"
+                    )
+                )
+            
+            break  # Only process one batch
+    
+    model.train()
+    return images_to_log
+
 
 # continuous wandb training from previous runs
 # model_run_ids = {
@@ -77,7 +167,7 @@ def main(cfg: DictConfig):
     model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
     os.makedirs(model_specific_dir, exist_ok=True)
     # save models with specific names
-    model_name_prefix = f"{cfg['model']['name']}_retrain_181225"
+    model_name_prefix = f"{cfg['model']['name']}_retrain_260126"
     best_loss_model_path = os.path.abspath(
         os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
     )
@@ -120,7 +210,8 @@ def main(cfg: DictConfig):
         )
         
         print(f"Checkpoint keys: {list(checkpoint.keys()) if checkpoint else 'None'}")
-        model.load_state_dict(checkpoint["model_state_dict"])
+        # We only save and load the segmentation head weights for the models
+        model = update_segmentation_head_weights_only(model, checkpoint["model_state_dict"], cfg)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         # Only load scheduler state if scheduler exists
         if scheduler is not None and "scheduler_state_dict" in checkpoint:
@@ -183,6 +274,23 @@ def main(cfg: DictConfig):
                 "val_mean_f1": val_metrics["mean_f1"],
             }
             wandb.log(wandb_metrics)
+            
+            # Log visualisations every 15 epochs
+            if (epoch + 1) % 15 == 0:
+                print(f"Logging visualisations to wandb for epoch {epoch + 1}...")
+                try:
+                    vis_images = log_visualisations_to_wandb(
+                        model, val_loader, device, 
+                        num_samples=2, 
+                        denormalise=True 
+                    )
+                    wandb.log({"predictions": vis_images, "epoch": epoch})
+                    print(f"Successfully logged {len(vis_images)} visualisation images")
+                    # Clean up
+                    del vis_images
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    print(f"Warning: Failed to log visualisations: {e}")
             
         if os.path.exists(metric_path):
             with open(metric_path, "a") as f:

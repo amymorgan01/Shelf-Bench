@@ -62,11 +62,28 @@ def save_model(
     val_iou: float,
     cfg: DictConfig,
 ):
+    # Find out what type of model it is
+    model_name = cfg["model"]["name"]
+    
+
+    if model_name in ["Unet", "FPN", "DeepLabV3"]:
+        training_state_dict = model.segmentation_head.state_dict()
+    
+
+    elif model_name == "ViT":
+        training_state_dict = model.decoder.state_dict()
+
+    elif model_name == "DinoV3":
+        training_state_dict = model.seg_head.state_dict()
+
+    else:
+        raise ValueError(f"Model {model_name} not recognized.")
+ 
     # Save model checkpoint with more information
     torch.save(
         {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": training_state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": (scheduler.state_dict() if scheduler else None),
             "best_val_loss": val_loss,
@@ -75,3 +92,4 @@ def save_model(
         },
         path,
     )
+    

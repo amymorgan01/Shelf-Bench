@@ -6,90 +6,115 @@ import hydra
 import logging
 import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score, jaccard_score
-from load_functions import load_model, get_loss_function
-
+from load_functions import load_model, get_loss_function, update_segmentation_head_weights_only
 
 log = logging.getLogger(__name__)
 
-
-def calculate_metrics(targets, predictions, num_classes, device):
-    """
-    Calculate precision, recall, and F1 score for each class.
-    Args:
-        targets: Ground truth masks (B, H, W)
-        predictions: Predicted masks (B, H, W)
-        num_classes: Number of classes
-        device: Device to run calculations on
-    Returns:
-        precision, recall, f1 arrays for each class
-    """
-    precision = torch.zeros(num_classes, device=device)
-    recall = torch.zeros(num_classes, device=device)
-    f1 = torch.zeros(num_classes, device=device)
+def accumulate_confusion_matrix(targets, predictions, num_classes, confusion_matrix):
 
     for cls in range(num_classes):
         pred_cls = predictions == cls
         target_cls = targets == cls
 
-        # True positives, false positives, false negatives
+        # True positives, false positives, false negatives, true negatives
         tp = (pred_cls & target_cls).sum().float()
         fp = (pred_cls & ~target_cls).sum().float()
         fn = (~pred_cls & target_cls).sum().float()
-        # Calculate metrics with epsilon to avoid division by zero
-        eps = 1e-8
+        tn = (~pred_cls & ~target_cls).sum().float()
+
+        confusion_matrix['tp'][cls] += tp
+        confusion_matrix['fp'][cls] += fp
+        confusion_matrix['fn'][cls] += fn
+        confusion_matrix['tn'][cls] += tn
+    
+    return confusion_matrix
+
+
+def calculate_metrics_from_confusion_matrix(confusion_matrix, num_classes, device):
+    """
+    Calculate precision, recall, and F1 score from confusion matrix.
+    """
+    precision = torch.zeros(num_classes, device=device)
+    recall = torch.zeros(num_classes, device=device)
+    f1 = torch.zeros(num_classes, device=device)
+
+    eps = 1e-8
+    
+    for cls in range(num_classes):
+        tp = confusion_matrix['tp'][cls]
+        fp = confusion_matrix['fp'][cls]
+        fn = confusion_matrix['fn'][cls]
+        
         precision[cls] = tp / (tp + fp + eps)
         recall[cls] = tp / (tp + fn + eps)
-        f1[cls] = (
-            2 * precision[cls] * recall[cls] / (precision[cls] + recall[cls] + eps)
-        )
+        f1[cls] = 2 * precision[cls] * recall[cls] / (precision[cls] + recall[cls] + eps)
 
     return precision.cpu().numpy(), recall.cpu().numpy(), f1.cpu().numpy()
 
 
-def calculate_iou_metrics(targets, predictions, num_classes, device):
+def accumulate_iou_components(targets, predictions, num_classes, iou_components):
     """
-    Calculate IoU for each class and mean IoU.
-
+    IoU calculation.
     """
-    class_ious = torch.zeros(num_classes, device=device)
     for cls in range(num_classes):
         pred_cls = predictions == cls
         target_cls = targets == cls
 
         intersection = (pred_cls & target_cls).sum().float()
         union = (pred_cls | target_cls).sum().float()
+        
+        iou_components['intersection'][cls] += intersection
+        iou_components['union'][cls] += union
+    
+    return iou_components
 
-        # Calculate IoU with epsilon to avoid division by zero
-        iou = intersection / (union + 1e-8)
-        class_ious[cls] = iou
 
+def calculate_iou_from_components(iou_components, num_classes, device):
+    """
+    Calculate IoU for each class and mean IoU 
+    """
+    class_ious = torch.zeros(num_classes, device=device)
+    eps = 1e-8
+    
+    for cls in range(num_classes):
+        intersection = iou_components['intersection'][cls]
+        union = iou_components['union'][cls]
+        class_ious[cls] = intersection / (union + eps)
+    
     mean_iou = class_ious.mean()
     return class_ious.cpu().numpy(), mean_iou.item()
 
 
 def evaluate_model(model_path, val_loader, device, cfg, log):
     """
-    Comprehensive model evaluation function.
-
+    model evaluation function
     """
     log.info(f"Loading model from {model_path}")
 
-    # Load model
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model = load_model(cfg, device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model = update_segmentation_head_weights_only(model, checkpoint["model_state_dict"], cfg)
     model.eval()
 
-    # Initialize metrics
     num_classes = cfg.model.classes
-    total_precision = torch.zeros(num_classes).to(device)
-    total_recall = torch.zeros(num_classes).to(device)
-    total_f1 = torch.zeros(num_classes).to(device)
-    total_class_ious = torch.zeros(num_classes).to(device)
+
+    confusion_matrix = {
+        'tp': torch.zeros(num_classes, device=device),
+        'fp': torch.zeros(num_classes, device=device),
+        'fn': torch.zeros(num_classes, device=device),
+        'tn': torch.zeros(num_classes, device=device)
+    }
+
+    iou_components = {
+        'intersection': torch.zeros(num_classes, device=device),
+        'union': torch.zeros(num_classes, device=device)
+    }
+    
     total_loss = 0.0
+    total_correct_pixels = 0
+    total_pixels = 0
 
     loss_function = get_loss_function(cfg)
-    num_batches = 0
 
     with torch.no_grad():
         for images, masks in val_loader:
@@ -102,41 +127,40 @@ def evaluate_model(model_path, val_loader, device, cfg, log):
 
             preds = torch.argmax(outputs, dim=1)
 
-            # Calculate metrics
-            batch_precision, batch_recall, batch_f1 = calculate_metrics(
-                masks, preds, num_classes, device
+            confusion_matrix = accumulate_confusion_matrix(
+                masks, preds, num_classes, confusion_matrix
             )
-            batch_class_ious, _ = calculate_iou_metrics(
-                masks, preds, num_classes, device
+            
+            iou_components = accumulate_iou_components(
+                masks, preds, num_classes, iou_components
             )
+            
+            total_correct_pixels += (masks == preds).sum().item()
+            total_pixels += masks.numel()
 
-            # Accumulate metrics
-            total_precision += torch.tensor(batch_precision).to(device)
-            total_recall += torch.tensor(batch_recall).to(device)
-            total_f1 += torch.tensor(batch_f1).to(device)
-            total_class_ious += torch.tensor(batch_class_ious).to(device)
-
-            num_batches += 1
-
-    # Calculate final metrics
     avg_loss = total_loss / len(val_loader)
-    avg_precision = total_precision / num_batches
-    avg_recall = total_recall / num_batches
-    avg_f1 = total_f1 / num_batches
-    avg_class_ious = total_class_ious / num_batches
-    mean_iou = avg_class_ious.mean().item()
+    
+    precision, recall, f1 = calculate_metrics_from_confusion_matrix(
+        confusion_matrix, num_classes, device
+    )
+    
+    class_ious, mean_iou = calculate_iou_from_components(
+        iou_components, num_classes, device
+    )
+    
+    pixel_accuracy = total_correct_pixels / total_pixels if total_pixels > 0 else 0.0
 
-    # Create comprehensive metrics dictionary
     metrics = {
         "loss": avg_loss,
         "mean_iou": mean_iou,
-        "class_ious": avg_class_ious.cpu().numpy(),
-        "mean_precision": avg_precision.mean().item(),
-        "mean_recall": avg_recall.mean().item(),
-        "mean_f1": avg_f1.mean().item(),
-        "precision_per_class": avg_precision.cpu().numpy(),
-        "recall_per_class": avg_recall.cpu().numpy(),
-        "f1_per_class": avg_f1.cpu().numpy(),
+        "pixel_accuracy": pixel_accuracy,
+        "class_ious": class_ious,
+        "mean_precision": np.mean(precision),
+        "mean_recall": np.mean(recall),
+        "mean_f1": np.mean(f1),
+        "precision_per_class": precision,
+        "recall_per_class": recall,
+        "f1_per_class": f1,
     }
 
     return metrics
@@ -144,11 +168,6 @@ def evaluate_model(model_path, val_loader, device, cfg, log):
 def calculate_pixel_accuracy(targets, predictions):
     """
     Calculate pixel-wise accuracy.
-    Args:
-        targets: Ground truth masks (B, H, W)
-        predictions: Predicted masks (B, H, W)
-    Returns:
-        accuracy: Pixel accuracy as a float
     """
     correct_pixels = (targets == predictions).sum().float()
     total_pixels = targets.numel()

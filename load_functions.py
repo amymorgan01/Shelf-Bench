@@ -62,6 +62,10 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
 
 
 def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
+    """
+    Load the models and remove gradients from pretrained backbones.
+    """
+    
     model_name = cfg["model"]["name"]
     in_channels = cfg["model"]["in_channels"]
     classes = cfg["model"]["classes"]
@@ -75,6 +79,10 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
+        backbone_params = [model.encoder, model.decoder]
+        for param in backbone_params:
+            for p in param.parameters():
+                p.requires_grad = False
     elif model_name == "FPN":
         encoder_name = cfg["model"]["encoder_name"]
         encoder_weights = cfg["model"]["encoder_weights"]
@@ -84,7 +92,10 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
-
+        backbone_params = [model.encoder, model.decoder]
+        for param in backbone_params:
+            for p in param.parameters():
+                p.requires_grad = False
     elif model_name == "DeepLabV3":
         encoder_name = cfg["model"]["encoder_name"]
         encoder_weights = cfg["model"]["encoder_weights"]
@@ -94,7 +105,10 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
-
+        backbone_params = [model.encoder, model.decoder]
+        for param in backbone_params:
+            for p in param.parameters():
+                p.requires_grad = False
     elif model_name == "ViT":
         img_size = cfg["model"]["img_size"]
         model = create_vit_large_16(
@@ -104,6 +118,7 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels
         )
         encoder_name = "ViT-Large"
+        # We have frozen the backbone in the model definition
 
     elif model_name == "DinoV3":
         img_size = cfg["model"]["img_size"]
@@ -119,6 +134,7 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             freeze_backbone=freeze_backbone
             )
         encoder_name = "DINOv3-ViT-L/16"
+        # We have frozen the backbone in the model definition
 
     else:
         raise ValueError(f"Model {model_name} not recognized.")
@@ -127,6 +143,27 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
     print(f"Model {model_name} with {encoder_name} loaded on {device}.")
     return model
 
+
+def update_segmentation_head_weights_only(model: nn.Module, state_dict: dict, cfg: DictConfig) -> nn.Module:
+    """
+    Update only the segmentation head weights of the model from the state_dict.
+    """
+    model_name = cfg["model"]["name"]
+    
+    segmentation_head = state_dict
+    if model_name in ["Unet", "FPN", "DeepLabV3"]:
+        model.segmentation_head = segmentation_head
+        print(f"Segmentation head weights updated for {model_name}.")
+    elif model_name == "ViT":
+        model.decoder = segmentation_head
+        print(f"Segmentation head weights updated for {model_name}.")
+    elif model_name  == "DinoV3":
+        model.seg_head = segmentation_head
+        print(f"Segmentation head weights updated for {model_name}.")
+    else:
+        raise ValueError(f"Model {model_name} not recognized for segmentation head update.")
+    
+    return model
 
 def get_loss_function(cfg: DictConfig) -> nn.Module:
     loss_name = cfg["training"]["loss_function"]

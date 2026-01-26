@@ -7,9 +7,10 @@ import torch.optim as optim
 import logging
 import wandb
 from omegaconf import DictConfig
-from metrics import calculate_metrics, calculate_iou_metrics
 from typing import Optional
 import gc
+from metrics import accumulate_confusion_matrix, calculate_metrics_from_confusion_matrix
+from metrics import accumulate_iou_components, calculate_iou_from_components
 
 
 def train_one_epoch(
@@ -32,7 +33,8 @@ def train_one_epoch(
         mask = mask.to(device)
 
         mask = mask / 255
-        mask = F.one_hot(mask.long(), num_classes=2).squeeze(1).permute(0, 3, 1, 2)
+        # mask = F.one_hot(mask.long(), num_classes=2).squeeze(1).permute(0, 3, 1, 2)   old line
+        mask = F.one_hot(mask.long(), num_classes=cfg.model.classes).squeeze(1).permute(0, 3, 1, 2).float()
 
         optimizer.zero_grad()
 
@@ -75,22 +77,43 @@ def validate_with_metrics(
     model.eval()
     val_loss = 0.0
     num_classes = cfg.model.classes
-    # Initialize metric accumulators
-    total_precision = torch.zeros(num_classes, device=device)
-    total_recall = torch.zeros(num_classes, device=device)
-    total_f1 = torch.zeros(num_classes, device=device)
-    total_class_ious = torch.zeros(num_classes, device=device)
+    
+    # Initialize confusion matrix components for proper metric calculation
+    confusion_matrix = {
+        'tp': torch.zeros(num_classes, device=device),
+        'fp': torch.zeros(num_classes, device=device),
+        'fn': torch.zeros(num_classes, device=device),
+        'tn': torch.zeros(num_classes, device=device)
+    }
+    
+    # Initialize IoU components
+    iou_components = {
+        'intersection': torch.zeros(num_classes, device=device),
+        'union': torch.zeros(num_classes, device=device)
+    }
+    
+    # Initialize pixel accuracy components
+    total_correct_pixels = 0
+    total_pixels = 0
 
-    num_batches = 0
     with torch.no_grad():
         for batch_idx, (images, masks) in enumerate(val_loader):
             images = images.to(device)
             masks = masks.to(device)
 
-            masks = masks / 255
+            # Normalize mask to [0, 1] range if needed
+            if masks.max() > 1:
+                masks = masks / 255.0
 
+            # Store original masks for metric calculation (class indices)
+            masks_for_metrics = masks.long()
+            
+            # Convert to one-hot encoding for loss calculation
             one_hot_masks = (
-                F.one_hot(masks.long(), num_classes=2).squeeze(1).permute(0, 3, 1, 2)
+                F.one_hot(masks.long(), num_classes=num_classes)
+                .squeeze(1)
+                .permute(0, 3, 1, 2)
+                .float()
             )
 
             outputs = model(images)
@@ -98,63 +121,66 @@ def validate_with_metrics(
             loss = loss_function(outputs, one_hot_masks)
             val_loss += loss.item()
 
-            # Get predictions
+            # Get predictions (convert back to class indices)
             preds = torch.argmax(outputs, dim=1)
 
-            # Calculate metrics for this batch
-            batch_precision, batch_recall, batch_f1 = calculate_metrics(
-                masks, preds, num_classes, device
+            # Accumulate confusion matrix components
+            confusion_matrix = accumulate_confusion_matrix(
+                masks_for_metrics, preds, num_classes, confusion_matrix
             )
-            batch_class_ious, batch_mean_iou = calculate_iou_metrics(
-                masks, preds, num_classes, device
+            
+            # Accumulate IoU components
+            iou_components = accumulate_iou_components(
+                masks_for_metrics, preds, num_classes, iou_components
             )
+            
+            # Accumulate pixel accuracy
+            total_correct_pixels += (masks_for_metrics == preds).sum().item()
+            total_pixels += masks_for_metrics.numel()
 
-            # Accumulate metrics
-            total_precision += torch.tensor(batch_precision, device=device)
-            total_recall += torch.tensor(batch_recall, device=device)
-            total_f1 += torch.tensor(batch_f1, device=device)
-            total_class_ious += torch.tensor(batch_class_ious, device=device)
-
-            num_batches += 1
-
-    # Calculate average metrics
+    # Calculate final metrics from accumulated components
     avg_val_loss = val_loss / len(val_loader)
-    avg_precision = total_precision / num_batches
-    avg_recall = total_recall / num_batches
-    avg_f1 = total_f1 / num_batches
-    avg_class_ious = total_class_ious / num_batches
-    mean_iou = avg_class_ious.mean().item()
+    
+    precision, recall, f1 = calculate_metrics_from_confusion_matrix(
+        confusion_matrix, num_classes, device
+    )
+    
+    class_ious, mean_iou = calculate_iou_from_components(
+        iou_components, num_classes, device
+    )
+    
+    pixel_accuracy = total_correct_pixels / total_pixels if total_pixels > 0 else 0.0
 
     # Log detailed metrics
     if epoch is not None:
-        print(f"Logging metrics for epoch {epoch + 1}...")
         log.info(f"Epoch {epoch + 1} Validation Results:")
         log.info(f"  Loss: {avg_val_loss:.4f}")
         log.info(f"  Mean IoU: {mean_iou:.4f}")
-        log.info(f"  Mean Precision: {avg_precision.mean().item():.4f}")
-        log.info(f"  Mean Recall: {avg_recall.mean().item():.4f}")
-        log.info(f"  Mean F1: {avg_f1.mean().item():.4f}")
-        print("Metrics logged.")
+        log.info(f"  Pixel Accuracy: {pixel_accuracy:.4f}")
+        log.info(f"  Mean Precision: {precision.mean():.4f}")
+        log.info(f"  Mean Recall: {recall.mean():.4f}")
+        log.info(f"  Mean F1: {f1.mean():.4f}")
+        
         # Log class-wise metrics if class names are available
         if hasattr(cfg, "class_names") and cfg.class_names:
             for i, class_name in enumerate(cfg.class_names):
                 log.info(
-                    f"  {class_name} - IoU: {avg_class_ious[i]:.4f}, "
-                    f"Precision: {avg_precision[i]:.4f}, "
-                    f"Recall: {avg_recall[i]:.4f}, F1: {avg_f1[i]:.4f}"
+                    f"  {class_name} - IoU: {class_ious[i]:.4f}, "
+                    f"Precision: {precision[i]:.4f}, "
+                    f"Recall: {recall[i]:.4f}, F1: {f1[i]:.4f}"
                 )
-        print("Class-wise metrics logged if available.")
 
     metrics = {
         "val_loss": avg_val_loss,
         "val_iou": mean_iou,
-        "mean_precision": avg_precision.mean().item(),
-        "mean_recall": avg_recall.mean().item(),
-        "mean_f1": avg_f1.mean().item(),
-        "class_ious": avg_class_ious.cpu().numpy(),
-        "precision_per_class": avg_precision.cpu().numpy(),
-        "recall_per_class": avg_recall.cpu().numpy(),
-        "f1_per_class": avg_f1.cpu().numpy(),
+        "pixel_accuracy": pixel_accuracy,
+        "mean_precision": precision.mean(),
+        "mean_recall": recall.mean(),
+        "mean_f1": f1.mean(),
+        "class_ious": class_ious,
+        "precision_per_class": precision,
+        "recall_per_class": recall,
+        "f1_per_class": f1,
     }
-    print("Returning metrics dictionary.")
+    
     return metrics

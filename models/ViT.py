@@ -42,7 +42,7 @@ class VisionTransformerConfig:
 
 
 class ViTSegmentation(nn.Module):
-    def __init__(self, num_classes=2, img_size=256, use_pretrained=True, in_channels=1):
+    def __init__(self, num_classes=2, img_size=256, use_pretrained=True, in_channels=1, freeze_backbone=True):
         super(ViTSegmentation, self).__init__()
         
         # Create the ViT backbone
@@ -86,6 +86,10 @@ class ViTSegmentation(nn.Module):
                     if original_conv.bias is not None:
                         self.vit.conv_proj.bias.copy_(original_conv.bias)
         
+        if freeze_backbone:
+            for param in self.vit.parameters():
+                param.requires_grad = False
+                
         # Segmentation decoder
         self.decoder = nn.Sequential(
             nn.Linear(feature_dim, 512),
@@ -131,8 +135,9 @@ class ViTSegmentation(nn.Module):
         else:
             x_vit = x
         
-        # Extract features using manual extraction
-        features = self.extract_patch_features(x_vit)  # [B, num_patches + 1, feature_dim]
+        with torch.no_grad():
+            # Extract features using manual extraction
+            features = self.extract_patch_features(x_vit)  # [B, num_patches + 1, feature_dim]
         
         # Remove CLS token to get only patch features
         patch_features = features[:, 1:]  # [B, num_patches, feature_dim]
