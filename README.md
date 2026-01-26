@@ -37,11 +37,11 @@ uv data_preprocessing.py
 ## 3. Apply trained_models to the Shelf-Bench dataset, or train from scratch using:
 
 ```
-python ideal_train_file.py -m model.name=CHOOSE MODELS training.loss_function=CHOOSE LOSS FUNCTIONS
+python continuous_train.py -m model.name=CHOOSE MODELS training.loss_function=CHOOSE LOSS FUNCTIONS
 ```
 or 
 ```
-uv run ideal_train_file.py -m model.name=CHOOSE MODELS training.loss_function=CHOOSE LOSS FUNCTIONS
+uv run continuous_train.py -m model.name=CHOOSE MODELS training.loss_function=CHOOSE LOSS FUNCTIONS
 ```
 
 This code uses Wandb which can be set up using: https://wandb.ai/site/

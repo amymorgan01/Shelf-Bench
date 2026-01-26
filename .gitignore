@@ -29,3 +29,7 @@ find_best_model.ipynb
 mde_analysis.ipynb
 MDE_vis_2.py
 paths.py
+MDE_w_CI.py
+visualisation_panels/
+load_model_check.py
+ideal_train_file.py
