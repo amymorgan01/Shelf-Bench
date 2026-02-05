@@ -63,8 +63,14 @@ benchmark_data_CB
 -------------- scenes
 """
 
-# all paths
-parent_dir = ROOT_GWS / "benchmark_data_CB"
+# OLD all paths
+# parent_dir = ROOT_GWS / "benchmark_data_CB"
+# S1_dir = os.path.join(parent_dir, "Sentinel-1")
+# ERS_dir = os.path.join(parent_dir, "ERS")
+# Envisat_dir = os.path.join(parent_dir, "Envisat")
+
+# NEW - JAN 2026, /gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH/preprocessed_data
+parent_dir = ROOT_GWS / "ICE-BENCH" / "benchmark_data_CB"
 S1_dir = os.path.join(parent_dir, "Sentinel-1")
 ERS_dir = os.path.join(parent_dir, "ERS")
 Envisat_dir = os.path.join(parent_dir, "Envisat")
@@ -119,9 +125,7 @@ class SatellitePreprocessor:
         
     def _resize_image(self,image,satellite):
         """
-
         Option to resize
-
         """
         if satellite in ['ERS', 'Envisat']:
 
@@ -579,8 +583,8 @@ if __name__ == "__main__":
         patch_size=PATCH_SIZE,
         overlap_train=OVERLAP_TRAIN,
         overlap_val=OVERLAP_VAL,
-        create_trainval=False,   # important
-        create_test=True
+        create_trainval=True,   # important
+        create_test=False
     )
     
-    preprocessor.process_all(process_trainval=False, process_test=True)
+    preprocessor.process_all(process_trainval=True, process_test=False)
