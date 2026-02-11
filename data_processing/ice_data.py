@@ -26,13 +26,12 @@ class IceDataset(Dataset):
             self.augment = augment
 
         if mode == "test":
-            # Test data is in ICE-BENCH subdirectory
-            base_path = os.path.dirname(os.path.dirname(parent_dir))  # Go up two levels from preprocessed_data/train
+            # Test data lives under ICE-BENCH/preprocessed_data/test
             self.image_dir = os.path.join(
-                base_path, "ICE-BENCH", "preprocessed_data", "test", "images"
+                parent_dir, "preprocessed_data", "test", "images"
             )
             self.mask_dir = os.path.join(
-                base_path, "ICE-BENCH", "preprocessed_data", "test", "masks"
+                parent_dir, "preprocessed_data", "test", "masks"
             )
 
         else:

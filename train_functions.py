@@ -101,16 +101,18 @@ def validate_with_metrics(
             images = images.to(device)
             masks = masks.to(device)
 
-            # Normalize mask to [0, 1] range if needed
+            # CONSISTENT with training: Always normalize to [0,1] then convert to class indices
             if masks.max() > 1:
                 masks = masks / 255.0
-
-            # Store original masks for metric calculation (class indices)
-            masks_for_metrics = masks.long()
+            
+            # Convert to class indices (0 or 1 for binary segmentation)
+            # For binary segmentation with values in [0,1], round to nearest class
+            masks_for_metrics = torch.round(masks).long()           #change jan 2026
+            # masks_for_metrics = (masks * (num_classes - 1)).long()
             
             # Convert to one-hot encoding for loss calculation
             one_hot_masks = (
-                F.one_hot(masks.long(), num_classes=num_classes)
+                F.one_hot(masks_for_metrics, num_classes=num_classes)
                 .squeeze(1)
                 .permute(0, 3, 1, 2)
                 .float()

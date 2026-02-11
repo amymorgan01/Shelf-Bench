@@ -63,7 +63,7 @@ def get_data_loaders(cfg: DictConfig) -> Tuple[DataLoader, DataLoader]:
 
 def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
     """
-    Load the models and remove gradients from pretrained backbones.
+    Load the models and freeze only the pretrained encoders.
     """
     
     model_name = cfg["model"]["name"]
@@ -79,10 +79,12 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
-        backbone_params = [model.encoder, model.decoder]
-        for param in backbone_params:
-            for p in param.parameters():
-                p.requires_grad = False
+        # Freeze encoder ONLY
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Frozen encoder. Decoder+head trainable: {trainable_params:,} params")
+                        
     elif model_name == "FPN":
         encoder_name = cfg["model"]["encoder_name"]
         encoder_weights = cfg["model"]["encoder_weights"]
@@ -92,10 +94,12 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
-        backbone_params = [model.encoder, model.decoder]
-        for param in backbone_params:
-            for p in param.parameters():
-                p.requires_grad = False
+        # Freeze encoder ONLY - NOT decoder
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Frozen encoder. Decoder+head trainable: {trainable_params:,} params")
+        
     elif model_name == "DeepLabV3":
         encoder_name = cfg["model"]["encoder_name"]
         encoder_weights = cfg["model"]["encoder_weights"]
@@ -105,10 +109,12 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels,
             classes=classes,
         )
-        backbone_params = [model.encoder, model.decoder]
-        for param in backbone_params:
-            for p in param.parameters():
-                p.requires_grad = False
+        # Freeze encoder ONLY - NOT decoder
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Frozen encoder. Decoder+head trainable: {trainable_params:,} params")
+        
     elif model_name == "ViT":
         img_size = cfg["model"]["img_size"]
         model = create_vit_large_16(
@@ -118,7 +124,7 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             in_channels=in_channels
         )
         encoder_name = "ViT-Large"
-        # We have frozen the backbone in the model definition
+        # Backbone frozen in model definition
 
     elif model_name == "DinoV3":
         img_size = cfg["model"]["img_size"]
@@ -132,9 +138,9 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
             satellite_weights_path=satellite_weights_path,
             segmentation_head=segmentation_head,
             freeze_backbone=freeze_backbone
-            )
+        )
         encoder_name = "DINOv3-ViT-L/16"
-        # We have frozen the backbone in the model definition
+        # Backbone frozen in model definition
 
     else:
         raise ValueError(f"Model {model_name} not recognized.")
@@ -144,26 +150,82 @@ def load_model(cfg: DictConfig, device: torch.device) -> nn.Module:
     return model
 
 
-def update_segmentation_head_weights_only(model: nn.Module, state_dict: dict, cfg: DictConfig) -> nn.Module:
-    """
-    Update only the segmentation head weights of the model from the state_dict.
-    """
-    model_name = cfg["model"]["name"]
+# def update_segmentation_head_weights_only(model: nn.Module, state_dict: dict, model_name: str) -> nn.Module:
+#     """
+#     Update only the segmentation head weights of the model from the state_dict.
+#     """
+#     # old
+#     # model_name = cfg["model"]["name"]
     
-    segmentation_head = state_dict
-    if model_name in ["Unet", "FPN", "DeepLabV3"]:
-        model.segmentation_head = segmentation_head
-        print(f"Segmentation head weights updated for {model_name}.")
-    elif model_name == "ViT":
-        model.decoder = segmentation_head
-        print(f"Segmentation head weights updated for {model_name}.")
-    elif model_name  == "DinoV3":
-        model.seg_head = segmentation_head
-        print(f"Segmentation head weights updated for {model_name}.")
-    else:
-        raise ValueError(f"Model {model_name} not recognized for segmentation head update.")
+#     # segmentation_head = state_dict
+#     # if model_name in ["Unet", "FPN", "DeepLabV3"]:
+#     #     model.segmentation_head = segmentation_head
+#     #     print(f"Segmentation head weights updated for {model_name}.")
+#     # elif model_name == "ViT":
+#     #     model.decoder = segmentation_head
+#     #     print(f"Segmentation head weights updated for {model_name}.")
+#     # elif model_name  == "DinoV3":
+#     #     model.seg_head = segmentation_head
+#     #     print(f"Segmentation head weights updated for {model_name}.")
+#     # else:
+#     #     raise ValueError(f"Model {model_name} not recognized for segmentation head update.")
     
-    return model
+#     # return model
+#     #model_name = cfg["model"]["name"]
+    
+#     if model_name in ["Unet", "FPN", "DeepLabV3"]:
+#         if hasattr(model, 'segmentation_head') and isinstance(state_dict, dict):
+#             model.segmentation_head.load_state_dict(state_dict)
+#             print(f"Segmentation head weights updated for {model_name} ({len(state_dict)} parameters).")
+#         else:
+#             raise ValueError(f"Cannot update segmentation head for {model_name}: invalid model structure or state_dict")
+            
+#     elif model_name == "ViT":
+#         if hasattr(model, 'decoder') and isinstance(state_dict, dict):
+#             model.decoder.load_state_dict(state_dict)
+#             print(f"Decoder weights updated for {model_name} ({len(state_dict)} parameters).")
+#         else:
+#             raise ValueError(f"Cannot update decoder for {model_name}: invalid model structure or state_dict")
+            
+#     elif model_name == "DinoV3":
+#         if hasattr(model, 'seg_head') and isinstance(state_dict, dict):
+#             model.seg_head.load_state_dict(state_dict)
+#             print(f"Segmentation head weights updated for {model_name} ({len(state_dict)} parameters).")
+#         else:
+#             raise ValueError(f"Cannot update seg_head for {model_name}: invalid model structure or state_dict")
+#     else:
+#         raise ValueError(f"Model {model_name} not recognized for segmentation head update.")
+    
+#     return model
+
+# update of segmentation head function
+def load_full_model_state(model: nn.Module, state_dict: dict, model_name: str) -> nn.Module:
+    """
+    Load the full model state dictionary (decoder + segmentation head).
+    The encoder remains frozen with pretrained weights.
+    """
+    try:
+        # Load the full model state
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Full model state loaded for {model_name}")
+        
+        # Verify what was loaded
+        loaded_keys = set(state_dict.keys())
+        model_keys = set(model.state_dict().keys())
+        
+        missing_keys = model_keys - loaded_keys
+        unexpected_keys = loaded_keys - model_keys
+        
+        if missing_keys:
+            print(f"Missing keys (expected - these are frozen encoder weights): {len(missing_keys)}")
+        if unexpected_keys:
+            print(f"WARNING: Unexpected keys in checkpoint: {unexpected_keys}")
+            
+        return model
+        
+    except Exception as e:
+        raise ValueError(f"Failed to load model state for {model_name}: {e}")
+
 
 def get_loss_function(cfg: DictConfig) -> nn.Module:
     loss_name = cfg["training"]["loss_function"]

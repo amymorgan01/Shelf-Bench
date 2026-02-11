@@ -1,12 +1,13 @@
 import os
 import torch
+import torch.nn.functional as F
 import gc
 import wandb
 import hydra
 import logging
 import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score, jaccard_score
-from load_functions import load_model, get_loss_function, update_segmentation_head_weights_only
+from load_functions import load_model, get_loss_function, load_full_model_state
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def evaluate_model(model_path, val_loader, device, cfg, log):
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model = load_model(cfg, device)
-    model = update_segmentation_head_weights_only(model, checkpoint["model_state_dict"], cfg)
+    model = load_full_model_state(model, checkpoint["model_state_dict"], cfg["model"]["name"])
     model.eval()
 
     num_classes = cfg.model.classes
@@ -115,28 +116,47 @@ def evaluate_model(model_path, val_loader, device, cfg, log):
     total_pixels = 0
 
     loss_function = get_loss_function(cfg)
+    if hasattr(loss_function, 'to'):
+        loss_function = loss_function.to(device)
 
     with torch.no_grad():
         for images, masks in val_loader:
             images = images.to(device)
-            masks = masks.to(device).long()
+            masks = masks.to(device)
+            
+            # CONSISTENT with training: Always normalize to [0,1] then convert to class indices
+            if masks.max() > 1:
+                masks = masks / 255.0
+            
+            # Convert to class indices
+            masks_for_metrics = (masks * (num_classes - 1)).long()
+            
+            # Convert to one-hot for loss
+            one_hot_masks = (
+                F.one_hot(masks_for_metrics, num_classes=num_classes)
+                .squeeze(1)
+                .permute(0, 3, 1, 2)
+                .float()
+            )
 
             outputs = model(images)
-            loss = loss_function(outputs, masks)
+            # previously 
+            # loss = loss_function(outputs, masks)
+            loss = loss_function(outputs, one_hot_masks)
             total_loss += loss.item()
 
             preds = torch.argmax(outputs, dim=1)
 
             confusion_matrix = accumulate_confusion_matrix(
-                masks, preds, num_classes, confusion_matrix
+                masks_for_metrics, preds, num_classes, confusion_matrix
             )
             
             iou_components = accumulate_iou_components(
-                masks, preds, num_classes, iou_components
+                masks_for_metrics, preds, num_classes, iou_components
             )
             
-            total_correct_pixels += (masks == preds).sum().item()
-            total_pixels += masks.numel()
+            total_correct_pixels += (masks_for_metrics == preds).sum().item()
+            total_pixels += masks_for_metrics.numel()
 
     avg_loss = total_loss / len(val_loader)
     

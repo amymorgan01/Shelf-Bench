@@ -1,6 +1,6 @@
 """Main Train file for Shelf-BENCH, including HYDRA IMPLEMENTATION and wandb logging.
 
-To run all models: uv run ideal_train_file.py -m model.name=Unet,FPN,ViT,DeepLabV3 other parameters...
+To run all models: uv run continuous_train.py -m model.name=Unet,FPN,ViT,DeepLabV3 other parameters...
 
 """
 
@@ -15,7 +15,7 @@ from misc_functions import set_seed, init_wandb, save_model
 from load_functions import (
     get_data_loaders,
     load_model,
-    update_segmentation_head_weights_only,
+    load_full_model_state,  # Changed from update_segmentation_head_weights_only
     get_optimizer,
     get_scheduler,
     get_loss_function,
@@ -27,8 +27,6 @@ import numpy as np
 from torchvision.utils import make_grid
 import torchvision.transforms.functional as TF
 from PIL import Image
-
-
 
 log = logging.getLogger(__name__)
 
@@ -46,76 +44,71 @@ print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')
 # training from new wandb run
 model_run_ids = None
 
-
-
 def log_visualisations_to_wandb(model, val_loader, device, num_samples=2, denormalise=True):
-    """Log sample predictions to wandb for visualization.
-    
-    Args:
-        model: The trained model
-        val_loader: Validation data loader
-        device: Device to run inference on
-        num_samples: Number of samples to visualize (default: 2 for memory efficiency with 5 models)
-        denormalize: Whether to denormalize images (set to False if not using ImageNet normalization)
-    """
-    model.eval()
-    images_to_log = []
-    
-    with torch.no_grad():
-        for images, masks in val_loader:
-            images = images.to(device)
-            masks = masks.to(device)
-            
-            outputs = model(images)
-            if isinstance(outputs, dict):
-                outputs = outputs['out']
+    """Log sample predictions to wandb for visualization."""
+    try:
+        model.eval()
+        images_to_log = []
 
-            preds = torch.argmax(outputs, dim=1)
-            
-            images = images[:num_samples].cpu()
-            masks = masks[:num_samples].cpu()
-            preds = preds[:num_samples].cpu()
-            
-            for i in range(min(num_samples, len(images))):
-                img = images[i]
-                
-                # Denormalise image if needed (vals vased on ImageNet)
-                if denormalise:
-                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                    img = img * std + mean
-                
-                img = torch.clamp(img, 0, 1)
-                
-                # Convert mask and prediction to RGB for visualisation
-                # Class 0 = black, Class 1 = white
-                mask_vis = masks[i].float().unsqueeze(0).repeat(3, 1, 1)
-                pred_vis = preds[i].float().unsqueeze(0).repeat(3, 1, 1)
-                
-                # Log to wandb
-                images_to_log.append(
-                    wandb.Image(
-                        img,
-                        caption=f"Sample {i+1}: Image"
-                    )
-                )
-                images_to_log.append(
-                    wandb.Image(
-                        mask_vis,
-                        caption=f"Sample {i+1}: Ground Truth"
-                    )
-                )
-                images_to_log.append(
-                    wandb.Image(
-                        pred_vis,
-                        caption=f"Sample {i+1}: Prediction"
-                    )
-                )
-            
-            break  # Only process one batch
-    
-    model.train()
-    return images_to_log
+        with torch.no_grad():
+            for images, masks in val_loader:
+                images = images.to(device)
+                masks = masks.to(device)
+
+                # Forward pass
+                outputs = model(images)
+                if isinstance(outputs, dict):
+                    outputs = outputs['out']
+
+                # Get predictions
+                preds = torch.argmax(outputs, dim=1)
+
+                # Move to CPU
+                images = images[:num_samples].cpu()
+                masks = masks[:num_samples].cpu()
+                preds = preds[:num_samples].cpu()
+
+                for i in range(min(num_samples, len(images))):
+                    img = images[i]
+                    mask = masks[i]
+                    pred = preds[i]
+
+                    # Denormalise image
+                    if denormalise:
+                        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                        img = img * std + mean
+                        img = torch.clamp(img, 0.0, 1.0)
+
+                    # Convert to numpy (H, W, C) format for wandb
+                    img_np = img.permute(1, 2, 0).numpy()
+                    
+                    # Remove channel dimension if present and convert to uint8
+                    mask_np = mask.squeeze().numpy() if mask.dim() == 3 else mask.numpy()
+                    pred_np = pred.squeeze().numpy() if pred.dim() == 3 else pred.numpy()
+                    
+                    # Normalize masks to 0-255 range for visualization
+                    mask_np = (mask_np * 255 / max(mask_np.max(), 1)).astype(np.uint8)
+                    pred_np = (pred_np * 255 / max(pred_np.max(), 1)).astype(np.uint8)
+                    
+                    # Convert grayscale masks to RGB for easier viewing
+                    mask_rgb = np.stack([mask_np]*3, axis=-1)
+                    pred_rgb = np.stack([pred_np]*3, axis=-1)
+
+                    # Log images
+                    images_to_log.append(wandb.Image(img_np, caption=f"Sample {i+1}: Image"))
+                    images_to_log.append(wandb.Image(mask_rgb, caption=f"Sample {i+1}: Ground Truth"))
+                    images_to_log.append(wandb.Image(pred_rgb, caption=f"Sample {i+1}: Prediction"))
+
+                break  # Only one batch
+        
+        model.train()
+        return images_to_log
+        
+    except Exception as e:
+        log.error(f"Visualization error: {e}", exc_info=True)
+        model.train()
+        return []
 
 
 # continuous wandb training from previous runs
@@ -167,7 +160,7 @@ def main(cfg: DictConfig):
     model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
     os.makedirs(model_specific_dir, exist_ok=True)
     # save models with specific names
-    model_name_prefix = f"{cfg['model']['name']}_retrain_260126"
+    model_name_prefix = f"{cfg['model']['name']}_retrain_090226_debug"
     best_loss_model_path = os.path.abspath(
         os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
     )
@@ -203,6 +196,11 @@ def main(cfg: DictConfig):
     start_epoch = 0
     best_val_loss = float("inf")
     best_val_iou = 0.0
+    epochs_without_improvement = 0
+    early_stopping_patience = cfg.get("early_stopping_patience", None)
+    early_stopping_metric = cfg.get("early_stopping_metric", "val_loss")  # or "val_iou"
+    
+   
     if cfg.get("load_path", False) and os.path.exists(checkpoint_path):
         log.info(f"Loading model weights from {checkpoint_path}")
         checkpoint = torch.load(
@@ -210,26 +208,25 @@ def main(cfg: DictConfig):
         )
         
         print(f"Checkpoint keys: {list(checkpoint.keys()) if checkpoint else 'None'}")
-        # We only save and load the segmentation head weights for the models
-        model = update_segmentation_head_weights_only(model, checkpoint["model_state_dict"], cfg)
+        
+        # Load FULL model state (decoder + segmentation head)
+        model = load_full_model_state(model, checkpoint["model_state_dict"], cfg["model"]["name"])
+        
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        # Only load scheduler state if scheduler exists
         if scheduler is not None and "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         elif scheduler is None:
             log.info("Scheduler is None - skipping scheduler state loading")
-        start_epoch = checkpoint.get("epoch", 0) + 1  # Resume from next epoch
+            
+        start_epoch = checkpoint.get("epoch", 0) + 1
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
-        log.info(
-            f"Model weights loaded successfully. Resuming from epoch {start_epoch}"
-        )
-        print(f"Model weights loaded successfully. Resuming from epoch {start_epoch}")
+        
+        log.info(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
+        print(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
     else:
-        log.info(
-            "No valid load_path specified or file does not exist. Training from scratch."
-        )
-    
+        log.info("No valid load_path specified or file does not exist. Training from scratch.")
+        
     for epoch in range(start_epoch, cfg["training"]["epochs"]):
         print(f"\n{'='*10} Epoch {epoch + 1}/{cfg['training']['epochs']} {'='*10}")
         print(f"DEBUG: start_epoch={start_epoch}, training.epochs={cfg['training']['epochs']}")
@@ -273,24 +270,46 @@ def main(cfg: DictConfig):
                 "val_mean_recall": val_metrics["mean_recall"],
                 "val_mean_f1": val_metrics["mean_f1"],
             }
+            
+            # Add per-class metrics if available
+            if "class_ious" in val_metrics and cfg.get("class_names"):
+                class_ious = val_metrics["class_ious"]
+                class_names = cfg["class_names"]
+                for i, class_name in enumerate(class_names):
+                    wandb_metrics[f"val_iou_{class_name}"] = class_ious[i].item() if hasattr(class_ious[i], 'item') else class_ious[i]
+                    if "precision_per_class" in val_metrics:
+                        wandb_metrics[f"val_precision_{class_name}"] = val_metrics["precision_per_class"][i]
+                    if "recall_per_class" in val_metrics:
+                        wandb_metrics[f"val_recall_{class_name}"] = val_metrics["recall_per_class"][i]
+            
             wandb.log(wandb_metrics)
             
             # Log visualisations every 15 epochs
             if (epoch + 1) % 15 == 0:
                 print(f"Logging visualisations to wandb for epoch {epoch + 1}...")
                 try:
+                    log.info(f"Starting visualization logging for epoch {epoch + 1}")
                     vis_images = log_visualisations_to_wandb(
                         model, val_loader, device, 
                         num_samples=2, 
                         denormalise=True 
                     )
-                    wandb.log({"predictions": vis_images, "epoch": epoch})
-                    print(f"Successfully logged {len(vis_images)} visualisation images")
+                    
+                    if vis_images:
+                        log.info(f"Successfully created {len(vis_images)} visualization images, logging to wandb...")
+                        wandb.log({"validation_predictions": vis_images}, step=epoch)
+                        print(f"Successfully logged {len(vis_images)} visualisation images to wandb")
+                    else:
+                        log.warning("No visualization images were created")
+                        print("Warning: No visualization images were created")
+                    
                     # Clean up
                     del vis_images
                     torch.cuda.empty_cache()
                 except Exception as e:
-                    print(f"Warning: Failed to log visualisations: {e}")
+                    log.error(f"Failed to log visualisations: {e}", exc_info=True)
+                    print(f"Error: Failed to log visualisations: {e}")
+                    # Don't fail the entire training loop for visualization issues
             
         if os.path.exists(metric_path):
             with open(metric_path, "a") as f:
@@ -310,6 +329,7 @@ def main(cfg: DictConfig):
         # Check and save ONLY if new best loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            epochs_without_improvement = 0  # Reset early stopping counter
             print(f" NEW BEST LOSS! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
             
             save_model(
@@ -328,6 +348,7 @@ def main(cfg: DictConfig):
         # Check and save ONLY if new best IoU  
         if val_iou > best_val_iou:
             best_val_iou = val_iou
+            epochs_without_improvement = 0  # Reset early stopping counter
             print(f" NEW BEST IoU! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
             
             save_model(
@@ -360,6 +381,20 @@ def main(cfg: DictConfig):
             print(" This epoch produced a new best model!")
         else:
             print("No new best model this epoch (normal)")
+
+        # Early stopping check
+        if early_stopping_patience is not None:
+            if not saved_best_model:
+                epochs_without_improvement += 1
+                print(f"No improvement for {epochs_without_improvement}/{early_stopping_patience} epochs")
+            
+            if epochs_without_improvement >= early_stopping_patience:
+                print(f"\n{'='*60}")
+                print(f"EARLY STOPPING TRIGGERED!")
+                print(f"No improvement in {early_stopping_metric} for {early_stopping_patience} epochs")
+                print(f"Best {early_stopping_metric}: {best_val_loss if early_stopping_metric == 'val_loss' else best_val_iou:.4f}")
+                print(f"{'='*60}")
+                break
 
         torch.cuda.empty_cache()
         gc.collect()

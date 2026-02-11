@@ -29,7 +29,13 @@ find_best_model.ipynb
 mde_analysis.ipynb
 MDE_vis_2.py
 paths.py
-MDE_w_CI.py
+MDE_2.py
 visualisation_panels/
 load_model_check.py
 ideal_train_file.py
+checkpoints_error.py
+debug_checkpoint.py
+epoch_check.py
+plot_training_vis.py
+test.ipynb
+training_curves.py

@@ -3,7 +3,7 @@ defaults:
 
 _target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
 submitit_folder: ${hydra.sweep.dir}/.submitit/%j
-exclude: gpuhost013
+exclude: gpuhost012
 timeout_min: 1439
 mem_gb: 40
 cpus_per_task: 8

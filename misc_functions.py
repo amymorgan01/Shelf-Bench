@@ -62,34 +62,29 @@ def save_model(
     val_iou: float,
     cfg: DictConfig,
 ):
-    # Find out what type of model it is
-    model_name = cfg["model"]["name"]
+    """
+    Save full model state including decoder and segmentation head.
+    The encoder weights are not saved since they remain frozen with pretrained weights.
+    """
     
-
-    if model_name in ["Unet", "FPN", "DeepLabV3"]:
-        training_state_dict = model.segmentation_head.state_dict()
+    # Save the FULL model state (decoder + segmentation head)
+    # This works for all model types
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),  # Save everything
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": (scheduler.state_dict() if scheduler else None),
+        "best_val_loss": val_loss,
+        "best_val_iou": val_iou,
+        "config": cfg,
+    }
     
-
-    elif model_name == "ViT":
-        training_state_dict = model.decoder.state_dict()
-
-    elif model_name == "DinoV3":
-        training_state_dict = model.seg_head.state_dict()
-
-    else:
-        raise ValueError(f"Model {model_name} not recognized.")
- 
-    # Save model checkpoint with more information
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": training_state_dict,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": (scheduler.state_dict() if scheduler else None),
-            "best_val_loss": val_loss,
-            "best_val_iou": val_iou,
-            "config": cfg,
-        },
-        path,
-    )
+    torch.save(checkpoint, path)
+    
+    # Log what we saved
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Saved model to {path}")
+    print(f"  Total params in state_dict: {total_params:,}")
+    print(f"  Trainable params: {trainable_params:,}")
     

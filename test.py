@@ -1,16 +1,19 @@
-"""
-    
+""" 
     Test file for Shelf-BENCH trained models
-    Evaluates 5 models (UNet, FPN, DeepLabV3, ViT, DinoV3)
-    
+    Evaluates 5 models (UNet, FPN, DeepLabV3, ViT, DinoV3)   
 """
 
 from data_processing.ice_data import IceDataset
 from models.ViT import create_vit_large_16
 from models.DinoV3 import DINOv3SegmentationModel
-from load_functions import load_model, get_loss_function
+from load_functions import load_model, get_loss_function, load_full_model_state
 from data_processing.ice_data import IceDataset
-from metrics import calculate_metrics, calculate_iou_metrics, evaluate_model, calculate_pixel_accuracy
+from metrics import (
+    evaluate_model, 
+    calculate_pixel_accuracy, accumulate_confusion_matrix,
+    calculate_metrics_from_confusion_matrix, accumulate_iou_components,
+    calculate_iou_from_components
+)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,6 +33,7 @@ import gc
 import hydra
 from pathlib import Path
 from paths import ROOT_GWS, ROOT_LOCAL
+from torch.cuda import amp
 
 warnings.filterwarnings('ignore')
 log = logging.getLogger(__name__)
@@ -49,22 +53,55 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
         cfg_copy = cfg.copy()
         cfg_copy.model.name = architecture 
         model = load_model(cfg_copy, device)
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
-        model.load_state_dict(checkpoint["model_state_dict"])
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        model = load_full_model_state(model, checkpoint["model_state_dict"], model_name)
+
+        # checkpoint_state_dict = checkpoint["model_state_dict"]
+
+        # # Load weights based on architecture
+        # if architecture == "ViT":
+        #     # For ViT, load the decoder weights
+        #     if hasattr(model, 'decoder') and isinstance(checkpoint_state_dict, dict):
+        #         model.decoder.load_state_dict(checkpoint_state_dict)
+        #         log.info(f"Loaded ViT decoder weights with {len(checkpoint_state_dict)} parameters")
+        # elif architecture == "DinoV3":
+        #     # For DinoV3, load the seg_head weights
+        #     if hasattr(model, 'seg_head') and isinstance(checkpoint_state_dict, dict):
+        #         model.seg_head.load_state_dict(checkpoint_state_dict)
+        #         log.info(f"Loaded DinoV3 seg_head weights with {len(checkpoint_state_dict)} parameters")
+        # else:
+        #     # For Unet, FPN, DeepLabV3, load both decoder and segmentation_head weights
+        #     if hasattr(model, 'decoder') and hasattr(model, 'segmentation_head') and isinstance(checkpoint_state_dict, dict):
+        #         if 'decoder' in checkpoint_state_dict and 'segmentation_head' in checkpoint_state_dict:
+        #             model.decoder.load_state_dict(checkpoint_state_dict['decoder'])
+        #             model.segmentation_head.load_state_dict(checkpoint_state_dict['segmentation_head'])
+        #             log.info(f"Loaded {architecture} decoder and segmentation_head weights")
+        #         else:
+        #             # Fallback for old checkpoints (only segmentation_head)
+        #             model.segmentation_head.load_state_dict(checkpoint_state_dict)
+        #             log.info(f"WARNING: Loaded only segmentation_head for {architecture} (old checkpoint format - will have low IoU!)")
+        
         model.eval()
 
         # Initialize metrics
         num_classes = cfg.model.classes
-        running_precision = np.zeros(num_classes)
-        running_recall = np.zeros(num_classes) 
-        running_f1 = np.zeros(num_classes)
         running_loss = 0.0
         num_batches = 0
-        
-        # IoU tracking - accumulate intersections and unions
-        class_intersection_totals = np.zeros(num_classes)
-        class_union_totals = np.zeros(num_classes)
+
+        # Confusion matrix accumulators
+        confusion_matrix = {
+            'tp': torch.zeros(num_classes, device=device),
+            'fp': torch.zeros(num_classes, device=device),
+            'fn': torch.zeros(num_classes, device=device),
+            'tn': torch.zeros(num_classes, device=device)
+        }
+
+        # IoU components accumulators
+        iou_components = {
+            'intersection': torch.zeros(num_classes, device=device),
+            'union': torch.zeros(num_classes, device=device)
+        }
         
         # Pixel accuracy tracking
         total_correct_pixels = 0
@@ -77,10 +114,11 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
 
         with torch.no_grad():
             for batch_idx, (images, masks) in enumerate(test_loader):
+                if batch_idx >= 100:
+                    break
                 images = images.to(device)
                 masks = masks.to(device)
                 
-                # **APPLY SAME PREPROCESSING AS IN TRAINING**
                 # 1. Normalize from [0,255] to [0,1]
                 if masks.max() > 1:
                     masks = masks / 255.0
@@ -89,8 +127,8 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
                 if masks.dim() == 4 and masks.size(1) == 1:
                     masks = masks.squeeze(1)
                 
-                # 3. Invert masks (same as training)
-                masks = 1 - masks
+                # # 3. Invert masks (same as training)
+                # masks = 1 - masks
                 
                 # 4. Ensure integer type for class indices
                 masks = masks.long()
@@ -108,7 +146,6 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
                 if batch_idx == 0:
                     log.info(f"  Outputs shape: {outputs.shape}")
                 
-
                 try:
 
                     loss = loss_function(outputs, masks)
@@ -136,25 +173,15 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
                 total_correct_pixels += correct_pixels
                 total_pixels += batch_pixels
 
-                # Calculate batch metrics using existing functions
-                batch_precision, batch_recall, batch_f1 = calculate_metrics(
-                    masks, preds, num_classes, device
+                # Accumulate confusion matrix
+                confusion_matrix = accumulate_confusion_matrix(
+                    masks, preds, num_classes, confusion_matrix
                 )
-                
-                # Accumulate metrics
-                running_precision += batch_precision
-                running_recall += batch_recall
-                running_f1 += batch_f1
 
-                # IoU calculation - accumulate intersections and unions
-                for cls in range(num_classes):
-                    pred_cls = (preds == cls)
-                    target_cls = (masks == cls)
-                    intersection = (pred_cls & target_cls).sum().float()
-                    union = (pred_cls | target_cls).sum().float()
-                    
-                    class_intersection_totals[cls] += intersection.item()
-                    class_union_totals[cls] += union.item()
+                # Accumulate IoU components
+                iou_components = accumulate_iou_components(
+                    masks, preds, num_classes, iou_components
+                )
 
                 # Only sample some batches for sklearn
                 if batch_idx % sample_every_n_batches == 0:
@@ -183,23 +210,22 @@ def evaluate_single_model(model_path, test_loader, device, cfg, model_name, arch
                 num_batches += 1
 
         # Calculate final metrics
+        if num_batches == 0 or total_pixels == 0:
+            log.error("No test batches were processed; check dataset and loop limits.")
+            return None
+
         avg_loss = running_loss / num_batches
         pixel_accuracy = total_correct_pixels / total_pixels
-        avg_precision = running_precision / num_batches
-        avg_recall = running_recall / num_batches
-        avg_f1 = running_f1 / num_batches
 
-        # IoU calculation
-        class_ious = []
-        for cls in range(num_classes):
-            if class_union_totals[cls] > 0:
-                iou = class_intersection_totals[cls] / class_union_totals[cls]
-            else:
-                iou = 0.0
-            class_ious.append(iou)
-        
-        class_ious = np.array(class_ious)
-        mean_iou = class_ious.mean()
+        # Calculate metrics from confusion matrix
+        avg_precision, avg_recall, avg_f1 = calculate_metrics_from_confusion_matrix(
+            confusion_matrix, num_classes, device
+        )
+
+        # Calculate IoU from components
+        class_ious, mean_iou = calculate_iou_from_components(
+            iou_components, num_classes, device
+        )
 
         # Calculate sklearn metrics on subset for verification
         sklearn_accuracy = sklearn_precision = sklearn_recall = sklearn_f1 = sklearn_jaccard = None
@@ -304,9 +330,9 @@ def run_testing(cfg, class_names=["Ocean", "Ice"]):
         #specify specific paths
         model_files = []
         expected_patterns = [
-            f"{arch_name}_bs32_correct_labels_latest_epoch.pth",
-            f"{arch_name}_bs32_correct_labels_best_loss.pth", 
-            f"{arch_name}_bs32_correct_labels_best_iou.pth"
+            f"{arch_name}_retrain_090226_X100_debug_latest_epoch.pth",
+            f"{arch_name}_retrain_090226_X100_debug_best_loss.pth", 
+            f"{arch_name}_retrain_090226_X100_debug_best_iou.pth"
         ]
         for pattern in expected_patterns:
             if os.path.exists(os.path.join(arch_path, pattern)):
@@ -344,12 +370,12 @@ def run_testing(cfg, class_names=["Ocean", "Ice"]):
     if all_results:
         log.info(f"Processing {len(all_results)} results...")
 
-        output_dir = Path(ROOT_GWS) / "benchmark_CB_AM" / "visualisation_panels"
+        output_dir = Path(ROOT_LOCAL) / "visualisation_panels"
         output_dir.mkdir(exist_ok=True)  # Create directory if it doesn't exist
         
         # Define output files with full paths
-        all_detailed_csv = output_dir / f"detailed_model_comparison.csv"
-        all_summary_csv = output_dir / f"architecture_summary.csv"
+        all_detailed_csv = output_dir / f"test_090126_X100_detailed_model_comparison.csv"
+        all_summary_csv = output_dir / f"test_090126_X100_architecture_summary.csv"
         
         try:
             # Create DataFrame with proper handling of numpy arrays
