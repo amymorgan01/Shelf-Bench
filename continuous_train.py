@@ -2,6 +2,13 @@
 
 To run all models: uv run continuous_train.py -m model.name=Unet,FPN,ViT,DeepLabV3 other parameters...
 
+Save-path behaviour
+-------------------
+* Normal run  → cfg.save_dir / <model_name> / ...
+* W&B sweep   → SWEEP_BASE_SAVE_DIR / <sweep_id> / <model_name> / ...
+
+The distinction is made automatically by inspecting wandb.run.sweep_id after
+wandb.init(), so you never need to change this file when switching modes.
 """
 
 import os
@@ -15,7 +22,7 @@ from misc_functions import set_seed, init_wandb, save_model
 from load_functions import (
     get_data_loaders,
     load_model,
-    load_full_model_state,  # Changed from update_segmentation_head_weights_only
+    load_full_model_state,
     get_optimizer,
     get_scheduler,
     get_loss_function,
@@ -27,10 +34,15 @@ import numpy as np
 from torchvision.utils import make_grid
 import torchvision.transforms.functional as TF
 from PIL import Image
+from hydra.core.hydra_config import HydraConfig
+from hydra.types import RunMode
 
 log = logging.getLogger(__name__)
 
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+
+# ── Base directory for all sweep model outputs ──────────────────────────────
+SWEEP_BASE_SAVE_DIR = "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/model_outputs/wandb_sweeps"
 
 # continuous wandb training from previous runs
 # model_run_ids = {
@@ -43,6 +55,76 @@ print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')
 
 # training from new wandb run
 model_run_ids = None
+
+
+def get_model_save_paths(cfg: DictConfig, model_name_prefix: str) -> dict:
+    """
+    Determine where to save models for this run.
+
+    Automatically detects whether we are inside a W&B sweep by inspecting
+    wandb.run.sweep_id.  Returns a dict:
+
+        is_sweep     – bool
+        model_dir    – directory that will hold the checkpoints
+        best_loss    – full path for best-loss checkpoint
+        best_iou     – full path for best-IoU  checkpoint
+        checkpoint   – full path for latest-epoch checkpoint   (sweep: None)
+        metric_path  – full path for the CSV metrics file      (sweep: None)
+
+    Layout for a normal run:
+        cfg.save_dir / <model_name> / <prefix>_best_loss.pth …
+
+    Layout for a sweep run:
+        SWEEP_BASE_SAVE_DIR / <sweep_id> / <model_name> / <prefix>_best_loss.pth …
+        (no rolling checkpoint or CSV — sweeps are short-lived trials)
+    """
+    model_name = cfg.model.name
+
+    # Detect W&B sweep
+    is_wandb_sweep = (
+        cfg.get("use_wandb", False)
+        and wandb.run is not None
+        and getattr(wandb.run, "sweep_id", None) is not None
+    )
+
+    # Detect Hydra multirun (submitit sweep)
+    is_hydra_sweep = HydraConfig.get().mode == RunMode.MULTIRUN
+
+    is_sweep = is_wandb_sweep or is_hydra_sweep
+
+    if is_wandb_sweep:
+        # Group by W&B sweep ID
+        sweep_id  = wandb.run.sweep_id
+        run_id    = wandb.run.id
+        model_dir = os.path.join(SWEEP_BASE_SAVE_DIR, f"wandb_{sweep_id}", model_name)
+        prefix    = f"{model_name}_run_{run_id}"
+
+    elif is_hydra_sweep:
+        # Group by Hydra sweep dir timestamp (already unique per sweep launch)
+        hydra_sweep_dir = HydraConfig.get().sweep.dir   # e.g. multirun/2024-01-15_10-30-00
+        sweep_label     = os.path.basename(hydra_sweep_dir)
+        model_dir       = os.path.join(SWEEP_BASE_SAVE_DIR, f"hydra_{sweep_label}", model_name)
+        prefix          = f"{model_name}_{HydraConfig.get().job.id}"  # unique job ID
+
+    else:
+        model_dir = os.path.join(cfg.save_dir, model_name)
+        prefix    = model_name_prefix
+
+    os.makedirs(model_dir, exist_ok=True)
+
+    paths = {
+        "is_sweep":    is_sweep,
+        "model_dir":   model_dir,
+        "best_loss":   os.path.abspath(os.path.join(model_dir, f"{prefix}_best_loss.pth")),
+        "best_iou":    os.path.abspath(os.path.join(model_dir, f"{prefix}_best_iou.pth")),
+        # These are only used / created for normal (non-sweep) runs
+        "checkpoint":  None if is_sweep else os.path.abspath(
+                           os.path.join(model_dir, f"{prefix}_latest_epoch.pth")),
+        "metric_path": None if is_sweep else os.path.abspath(
+                           os.path.join(model_dir, f"{prefix}_metrics.csv")),
+    }
+    return paths
+
 
 def log_visualisations_to_wandb(model, val_loader, device, num_samples=2, denormalise=True):
     """Log sample predictions to wandb for visualization."""
@@ -53,75 +135,51 @@ def log_visualisations_to_wandb(model, val_loader, device, num_samples=2, denorm
         with torch.no_grad():
             for images, masks in val_loader:
                 images = images.to(device)
-                masks = masks.to(device)
+                masks  = masks.to(device)
 
-                # Forward pass
                 outputs = model(images)
                 if isinstance(outputs, dict):
                     outputs = outputs['out']
 
-                # Get predictions
-                preds = torch.argmax(outputs, dim=1)
-
-                # Move to CPU
+                preds  = torch.argmax(outputs, dim=1)
                 images = images[:num_samples].cpu()
-                masks = masks[:num_samples].cpu()
-                preds = preds[:num_samples].cpu()
+                masks  = masks[:num_samples].cpu()
+                preds  = preds[:num_samples].cpu()
 
                 for i in range(min(num_samples, len(images))):
-                    img = images[i]
+                    img  = images[i]
                     mask = masks[i]
                     pred = preds[i]
 
-                    # Denormalise image
                     if denormalise:
                         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                        img = img * std + mean
-                        img = torch.clamp(img, 0.0, 1.0)
+                        std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                        img  = torch.clamp(img * std + mean, 0.0, 1.0)
 
-                    # Convert to numpy (H, W, C) format for wandb
-                    img_np = img.permute(1, 2, 0).numpy()
-                    
-                    # Remove channel dimension if present and convert to uint8
+                    img_np  = img.permute(1, 2, 0).numpy()
                     mask_np = mask.squeeze().numpy() if mask.dim() == 3 else mask.numpy()
                     pred_np = pred.squeeze().numpy() if pred.dim() == 3 else pred.numpy()
-                    
-                    # Normalize masks to 0-255 range for visualization
+
                     mask_np = (mask_np * 255 / max(mask_np.max(), 1)).astype(np.uint8)
                     pred_np = (pred_np * 255 / max(pred_np.max(), 1)).astype(np.uint8)
-                    
-                    # Convert grayscale masks to RGB for easier viewing
-                    mask_rgb = np.stack([mask_np]*3, axis=-1)
-                    pred_rgb = np.stack([pred_np]*3, axis=-1)
 
-                    # Log images
-                    images_to_log.append(wandb.Image(img_np, caption=f"Sample {i+1}: Image"))
+                    mask_rgb = np.stack([mask_np] * 3, axis=-1)
+                    pred_rgb = np.stack([pred_np] * 3, axis=-1)
+
+                    images_to_log.append(wandb.Image(img_np,   caption=f"Sample {i+1}: Image"))
                     images_to_log.append(wandb.Image(mask_rgb, caption=f"Sample {i+1}: Ground Truth"))
                     images_to_log.append(wandb.Image(pred_rgb, caption=f"Sample {i+1}: Prediction"))
 
                 break  # Only one batch
-        
+
         model.train()
         return images_to_log
-        
+
     except Exception as e:
         log.error(f"Visualization error: {e}", exc_info=True)
         model.train()
         return []
 
-
-# continuous wandb training from previous runs
-# model_run_ids = {
-#     "FPN": "f9nhdf5r",
-#     "Unet": "tsab9f1v",
-#     "DeepLabV3": "isst5072",
-#     "DinoV3": "1ycmbstp",
-#     "ViT": "g2gdkxkp"
-#     }
-
-# training from new wandb run
-model_run_ids = None
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
@@ -130,7 +188,6 @@ def main(cfg: DictConfig):
     print("Training config:", cfg.training)
     print("Model config:", cfg.model)
 
-    # Set random seed
     set_seed(cfg["seed"])
     job_id = None
     if model_run_ids is not None:
@@ -138,323 +195,285 @@ def main(cfg: DictConfig):
 
     init_wandb(cfg, job_id=job_id)
     print("wandb init done")
-    print(60*"=")
+    print(60 * "=")
     print(f"model name: {cfg.model.name}, job_id: {job_id}")
-    print(60*"=")
+    print(60 * "=")
 
-    # Force CUDA device if available
     if torch.cuda.is_available():
         cfg.device = "cuda"
         torch.cuda.empty_cache()
     else:
         print("WARNING: CUDA not available, using CPU")
         cfg.device = "cpu"
-        
 
-    # Set device
     device = torch.device(cfg.device)
     print(f"Using device: {device}")
 
-    # save models
-    base_save_dir = cfg.save_dir
-    model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
-    os.makedirs(model_specific_dir, exist_ok=True)
-    # save models with specific names
-    model_name_prefix = f"{cfg['model']['name']}_retrain_090226_debug"
-    best_loss_model_path = os.path.abspath(
-        os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
-    )
-    best_iou_model_path = os.path.abspath(
-        os.path.join(model_specific_dir, f"{model_name_prefix}_best_iou.pth")
-    )
-    metric_path = os.path.abspath(
-        os.path.join(model_specific_dir, f"{model_name_prefix}_metrics.csv")
-    )
+    # ── Build save paths (auto-detects sweep vs normal run) ─────────────────
+    model_name_prefix = f"{cfg['model']['name']}_retrain_250326_debug"
+    paths = get_model_save_paths(cfg, model_name_prefix)
 
-    checkpoint_path = os.path.abspath(
-        os.path.join(model_specific_dir, f"{model_name_prefix}_latest_epoch.pth")
-    )
-    print(f"Does checkpoint exist? {os.path.exists(checkpoint_path)}")
-    
-    # Get data loaders
+    print(f"Save directory : {paths['model_dir']}")
+    print(f"  is_sweep     : {paths['is_sweep']}")
+    print(f"  best_loss    : {paths['best_loss']}")
+    print(f"  best_iou     : {paths['best_iou']}")
+    if not paths["is_sweep"]:
+        print(f"  checkpoint   : {paths['checkpoint']}")
+        print(f"  metric_path  : {paths['metric_path']}")
+
+    # Convenience aliases used throughout the rest of the function
+    best_loss_model_path = paths["best_loss"]
+    best_iou_model_path  = paths["best_iou"]
+    checkpoint_path      = paths["checkpoint"]   # None for sweeps
+    metric_path          = paths["metric_path"]  # None for sweeps
+
+    if cfg.get("use_wandb", False) and wandb.run is not None:
+        wandb.config.update(
+            {"model_save_dir": paths["model_dir"], "is_sweep": paths["is_sweep"]},
+            allow_val_change=True,
+        )
+
+    # ── Data / model / training setup ───────────────────────────────────────
     train_loader, val_loader = get_data_loaders(cfg)
     log.info("After DataLoader creation")
 
-    # Load the model
     print("Loading model...")
     model = load_model(cfg, device)
     model = model.to(device)
-   
-    # Load loss function, optimizer, and scheduler
+
     loss_function = get_loss_function(cfg)
-    if hasattr(loss_function, 'to'):
+    if hasattr(loss_function, "to"):
         loss_function = loss_function.to(device)
     optimizer = get_optimizer(cfg, model)
     scheduler = get_scheduler(cfg, optimizer)
 
-    # Check if checkpoint exists and load if specified
-    start_epoch = 0
-    best_val_loss = float("inf")
-    best_val_iou = 0.0
+    start_epoch              = 0
+    best_val_loss            = float("inf")
+    best_val_iou             = 0.0
     epochs_without_improvement = 0
-    early_stopping_patience = cfg.get("early_stopping_patience", None)
-    early_stopping_metric = cfg.get("early_stopping_metric", "val_loss")  # or "val_iou"
-    
-   
-    if cfg.get("load_path", False) and os.path.exists(checkpoint_path):
+    early_stopping_patience  = cfg.get("early_stopping_patience", None)
+    early_stopping_metric    = cfg.get("early_stopping_metric", "val_loss")
+
+    # ── Resume from checkpoint (normal runs only) ────────────────────────────
+    # Sweeps always start fresh — each trial is an independent short run.
+    if (
+        not paths["is_sweep"]
+        and cfg.get("load_path", False)
+        and checkpoint_path is not None
+        and os.path.exists(checkpoint_path)
+    ):
         log.info(f"Loading model weights from {checkpoint_path}")
-        checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False
-        )
-        
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         print(f"Checkpoint keys: {list(checkpoint.keys()) if checkpoint else 'None'}")
-        
-        # Load FULL model state (decoder + segmentation head)
+
         model = load_full_model_state(model, checkpoint["model_state_dict"], cfg["model"]["name"])
-        
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
         if scheduler is not None and "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         elif scheduler is None:
             log.info("Scheduler is None - skipping scheduler state loading")
-            
-        start_epoch = checkpoint.get("epoch", 0) + 1
+
+        start_epoch   = checkpoint.get("epoch", 0) + 1
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-        best_val_iou = checkpoint.get("best_val_iou", 0.0)
-        
-        log.info(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
-        print(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
+        best_val_iou  = checkpoint.get("best_val_iou", 0.0)
+
+        log.info(f"Full model state loaded. Resuming from epoch {start_epoch}")
+        print(f"Full model state loaded. Resuming from epoch {start_epoch}")
     else:
-        log.info("No valid load_path specified or file does not exist. Training from scratch.")
-        
+        reason = (
+            "sweep run (always trains from scratch)"
+            if paths["is_sweep"]
+            else "no valid load_path or checkpoint file not found"
+        )
+        log.info(f"Training from scratch — {reason}.")
+        if checkpoint_path:
+            print(f"Does checkpoint exist? {os.path.exists(checkpoint_path)}")
+
+    # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg["training"]["epochs"]):
         print(f"\n{'='*10} Epoch {epoch + 1}/{cfg['training']['epochs']} {'='*10}")
         print(f"DEBUG: start_epoch={start_epoch}, training.epochs={cfg['training']['epochs']}")
-        
-        # Train one epoch
+
         train_loss = train_one_epoch(
-            model,
-            train_loader,
-            loss_function,
-            optimizer,
-            device,
-            cfg,
-            log,
-            epoch=epoch,
+            model, train_loader, loss_function, optimizer, device, cfg, log, epoch=epoch
         )
-        print(f"train_one_epoch returned successfully. Loss: {train_loss:.4f}")
-        print("About to call validate_with_metrics...")
+        print(f"train_one_epoch returned. Loss: {train_loss:.4f}")
 
         val_metrics = validate_with_metrics(
             model, val_loader, loss_function, device, cfg, log, epoch=epoch
         )
-        print(f"validate_with_metrics returned successfully.")
         val_loss = val_metrics["val_loss"]
-        val_iou = val_metrics["val_iou"]
-        print(f"Epoch {epoch + 1} Results:")
-        print(f"  Train Loss: {train_loss:.4f}")
-        print(f"  Val Loss: {val_loss:.4f}")
-        print(f"  Val IoU: {val_iou:.4f}")
-        
-        # Update scheduler
+        val_iou  = val_metrics["val_iou"]
+
+        print(f"Epoch {epoch + 1} — Train Loss: {train_loss:.4f}  Val Loss: {val_loss:.4f}  Val IoU: {val_iou:.4f}")
+
         if scheduler is not None:
             scheduler.step()
 
+        # ── W&B logging ──────────────────────────────────────────────────────
         if cfg.get("use_wandb", False):
             wandb_metrics = {
-                "epoch": epoch,
-                "train_epoch_loss": train_loss,
-                "val_loss": val_loss,
-                "val_mean_iou": val_iou,
+                "epoch":              epoch,
+                "train_epoch_loss":   train_loss,
+                "val_loss":           val_loss,
+                "val_mean_iou":       val_iou,
                 "val_mean_precision": val_metrics["mean_precision"],
-                "val_mean_recall": val_metrics["mean_recall"],
-                "val_mean_f1": val_metrics["mean_f1"],
+                "val_mean_recall":    val_metrics["mean_recall"],
+                "val_mean_f1":        val_metrics["mean_f1"],
             }
-            
-            # Add per-class metrics if available
+
             if "class_ious" in val_metrics and cfg.get("class_names"):
-                class_ious = val_metrics["class_ious"]
+                class_ious  = val_metrics["class_ious"]
                 class_names = cfg["class_names"]
                 for i, class_name in enumerate(class_names):
-                    wandb_metrics[f"val_iou_{class_name}"] = class_ious[i].item() if hasattr(class_ious[i], 'item') else class_ious[i]
+                    wandb_metrics[f"val_iou_{class_name}"] = (
+                        class_ious[i].item() if hasattr(class_ious[i], "item") else class_ious[i]
+                    )
                     if "precision_per_class" in val_metrics:
                         wandb_metrics[f"val_precision_{class_name}"] = val_metrics["precision_per_class"][i]
                     if "recall_per_class" in val_metrics:
                         wandb_metrics[f"val_recall_{class_name}"] = val_metrics["recall_per_class"][i]
-            
+
             wandb.log(wandb_metrics)
-            
-            # Log visualisations every 15 epochs
+
             if (epoch + 1) % 15 == 0:
                 print(f"Logging visualisations to wandb for epoch {epoch + 1}...")
                 try:
-                    log.info(f"Starting visualization logging for epoch {epoch + 1}")
                     vis_images = log_visualisations_to_wandb(
-                        model, val_loader, device, 
-                        num_samples=2, 
-                        denormalise=True 
+                        model, val_loader, device, num_samples=2, denormalise=True
                     )
-                    
                     if vis_images:
-                        log.info(f"Successfully created {len(vis_images)} visualization images, logging to wandb...")
                         wandb.log({"validation_predictions": vis_images}, step=epoch)
-                        print(f"Successfully logged {len(vis_images)} visualisation images to wandb")
+                        print(f"Logged {len(vis_images)} visualisation images to wandb")
                     else:
-                        log.warning("No visualization images were created")
                         print("Warning: No visualization images were created")
-                    
-                    # Clean up
                     del vis_images
                     torch.cuda.empty_cache()
                 except Exception as e:
                     log.error(f"Failed to log visualisations: {e}", exc_info=True)
                     print(f"Error: Failed to log visualisations: {e}")
-                    # Don't fail the entire training loop for visualization issues
-            
-        if os.path.exists(metric_path):
-            with open(metric_path, "a") as f:
-                f.write(
-                    f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
-                )
-        else:
-            with open(metric_path, "w") as f:
-                f.write("epoch,train_loss,val_loss,val_iou\n")
-                f.write(
-                    f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
-                )
 
-        # Track saved a best model this epoch
+        # ── CSV metric logging (normal runs only) ────────────────────────────
+        if metric_path is not None:
+            if os.path.exists(metric_path):
+                with open(metric_path, "a") as f:
+                    f.write(f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n")
+            else:
+                with open(metric_path, "w") as f:
+                    f.write("epoch,train_loss,val_loss,val_iou\n")
+                    f.write(f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n")
+
+        # ── Checkpoint saving ─────────────────────────────────────────────────
         saved_best_model = False
-        
-        # Check and save ONLY if new best loss
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            epochs_without_improvement = 0  # Reset early stopping counter
-            print(f" NEW BEST LOSS! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
-            
+            saved_best_model = True
+            print(f"  ✓ NEW BEST LOSS {val_loss:.4f}")
             save_model(
                 best_loss_model_path,
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_val_loss,
-                best_val_iou,
-                cfg,
+                model, optimizer, scheduler,
+                epoch, best_val_loss, best_val_iou, cfg,
             )
-            print(f"Best loss model saved/updated: {best_loss_model_path}")
-            saved_best_model = True
+            print(f"    → {best_loss_model_path}")
 
-        # Check and save ONLY if new best IoU  
         if val_iou > best_val_iou:
             best_val_iou = val_iou
-            epochs_without_improvement = 0  # Reset early stopping counter
-            print(f" NEW BEST IoU! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
-            
+            saved_best_model = True
+            print(f"  ✓ NEW BEST IoU  {val_iou:.4f}")
             save_model(
                 best_iou_model_path,
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_val_loss,
-                best_val_iou,
-                cfg,
+                model, optimizer, scheduler,
+                epoch, best_val_loss, best_val_iou, cfg,
             )
-            print(f"Best IoU model saved/updated: {best_iou_model_path}")
-            saved_best_model = True
+            print(f"    → {best_iou_model_path}")
 
-        save_model(
-            checkpoint_path,
-            model,
-            optimizer,
-            scheduler,
-            epoch,
-            best_val_loss,
-            best_val_iou,
-            cfg,
-        )
-        print(f" Latest checkpoint updated: {checkpoint_path}")
+        # Rolling latest-epoch checkpoint — skip for sweep trials
+        if checkpoint_path is not None:
+            save_model(
+                checkpoint_path,
+                model, optimizer, scheduler,
+                epoch, best_val_loss, best_val_iou, cfg,
+            )
+            print(f"  Latest checkpoint updated: {checkpoint_path}")
 
-        # Print saving summary for this epoch
         if saved_best_model:
-            print(" This epoch produced a new best model!")
+            print("  This epoch produced a new best model!")
         else:
-            print("No new best model this epoch (normal)")
+            print("  No new best model this epoch (normal)")
 
-        # Early stopping check
+        # ── Early stopping ────────────────────────────────────────────────────
         if early_stopping_patience is not None:
             if not saved_best_model:
                 epochs_without_improvement += 1
-                print(f"No improvement for {epochs_without_improvement}/{early_stopping_patience} epochs")
-            
+                print(f"  No improvement for {epochs_without_improvement}/{early_stopping_patience} epochs")
+            else:
+                epochs_without_improvement = 0
+
             if epochs_without_improvement >= early_stopping_patience:
                 print(f"\n{'='*60}")
                 print(f"EARLY STOPPING TRIGGERED!")
-                print(f"No improvement in {early_stopping_metric} for {early_stopping_patience} epochs")
-                print(f"Best {early_stopping_metric}: {best_val_loss if early_stopping_metric == 'val_loss' else best_val_iou:.4f}")
+                print(f"No improvement for {early_stopping_patience} epochs")
                 print(f"{'='*60}")
                 break
 
         torch.cuda.empty_cache()
         gc.collect()
         print(f"EPOCH {epoch + 1} COMPLETED SUCCESSFULLY")
-        print(f"About to continue to next epoch...")
 
-    # Final evaluation
+    # ── Final evaluation ──────────────────────────────────────────────────────
     print(f"\n{'='*20} Final Evaluation {'='*20}")
 
     if os.path.exists(best_loss_model_path):
         print("Evaluating best loss model...")
-        best_loss_metrics = evaluate_model(
-            best_loss_model_path, val_loader, device, cfg, log
-        )
+        best_loss_metrics = evaluate_model(best_loss_model_path, val_loader, device, cfg, log)
 
-    # Evaluate best IoU model
     if os.path.exists(best_iou_model_path):
         print("\nEvaluating best IoU model...")
-        best_iou_metrics = evaluate_model(
-            best_iou_model_path, val_loader, device, cfg, log
-        )
+        best_iou_metrics = evaluate_model(best_iou_model_path, val_loader, device, cfg, log)
 
-    # Final wandb logging
+    # ── Final wandb logging ───────────────────────────────────────────────────
     if cfg.get("use_wandb", False):
         final_wandb_metrics = {
-            "final_best_val_loss": best_val_loss,
-            "final_best_val_iou": best_val_iou,
-            "total_epochs_trained": cfg["training"]["epochs"],
+            "final_best_val_loss":     best_val_loss,
+            "final_best_val_iou":      best_val_iou,
+            "total_epochs_trained":    cfg["training"]["epochs"],
         }
 
         if "best_loss_metrics" in locals():
-            final_wandb_metrics.update(
-                {
-                    f"final_best_loss_model_{k}": v
-                    for k, v in best_loss_metrics.items()
-                    if isinstance(v, (int, float))  # Only log scalar values to wandb
-                }
-            )
+            final_wandb_metrics.update({
+                f"final_best_loss_model_{k}": v
+                for k, v in best_loss_metrics.items()
+                if isinstance(v, (int, float))
+            })
 
         if "best_iou_metrics" in locals():
-            final_wandb_metrics.update(
-                {
-                    f"final_best_iou_model_{k}": v
-                    for k, v in best_iou_metrics.items()
-                    if isinstance(v, (int, float))  # Only log scalar values to wandb
-                }
-            )
+            final_wandb_metrics.update({
+                f"final_best_iou_model_{k}": v
+                for k, v in best_iou_metrics.items()
+                if isinstance(v, (int, float))
+            })
+
+        # Surface best model paths in the summary for easy lookup
+        if cfg.get("use_wandb", False) and wandb.run is not None:
+            wandb.summary["best_val_loss"]    = best_val_loss
+            wandb.summary["best_val_iou"]     = best_val_iou
+            wandb.summary["best_loss_path"]   = best_loss_model_path
+            wandb.summary["best_iou_path"]    = best_iou_model_path
 
         wandb.log(final_wandb_metrics)
         wandb.finish()
 
-    # Print summary
     print("\n" + "=" * 60)
     print("TRAINING SUMMARY:")
     print("=" * 60)
-    print(f"Total epochs trained: {cfg['training']['epochs']}")
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Best validation IoU: {best_val_iou:.4f}")
-    print(f"Best loss model saved at: {best_loss_model_path}")
-    print(f"Best IoU model saved at: {best_iou_model_path}")
+    print(f"Mode                 : {'SWEEP' if paths['is_sweep'] else 'normal'}")
+    print(f"Total epochs trained : {cfg['training']['epochs']}")
+    print(f"Best validation loss : {best_val_loss:.4f}")
+    print(f"Best validation IoU  : {best_val_iou:.4f}")
+    print(f"Best loss model      : {best_loss_model_path}")
+    print(f"Best IoU  model      : {best_iou_model_path}")
     print("=" * 60)
 
     return best_val_loss, best_val_iou
@@ -462,3 +481,474 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
+
+"""
+old version, pre wandb sweeps
+"""
+
+
+
+# """Main Train file for Shelf-BENCH, including HYDRA IMPLEMENTATION and wandb logging.
+
+# To run all models: uv run continuous_train.py -m model.name=Unet,FPN,ViT,DeepLabV3 other parameters...
+
+# """
+
+# import os
+# import torch
+# import gc
+# import wandb
+# import hydra
+# import logging
+# from omegaconf import DictConfig
+# from misc_functions import set_seed, init_wandb, save_model
+# from load_functions import (
+#     get_data_loaders,
+#     load_model,
+#     load_full_model_state,  # Changed from update_segmentation_head_weights_only
+#     get_optimizer,
+#     get_scheduler,
+#     get_loss_function,
+# )
+# from train_functions import train_one_epoch, validate_with_metrics
+# from metrics import evaluate_model
+# from torch.cuda.amp import autocast, GradScaler
+# import numpy as np
+# from torchvision.utils import make_grid
+# import torchvision.transforms.functional as TF
+# from PIL import Image
+
+# log = logging.getLogger(__name__)
+
+# print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+
+# # continuous wandb training from previous runs
+# # model_run_ids = {
+# #     "FPN": "f9nhdf5r",
+# #     "Unet": "tsab9f1v",
+# #     "DeepLabV3": "isst5072",
+# #     "DinoV3": "1ycmbstp",
+# #     "ViT": "g2gdkxkp"
+# #     }
+
+# # training from new wandb run
+# model_run_ids = None
+
+# def log_visualisations_to_wandb(model, val_loader, device, num_samples=2, denormalise=True):
+#     """Log sample predictions to wandb for visualization."""
+#     try:
+#         model.eval()
+#         images_to_log = []
+
+#         with torch.no_grad():
+#             for images, masks in val_loader:
+#                 images = images.to(device)
+#                 masks = masks.to(device)
+
+#                 # Forward pass
+#                 outputs = model(images)
+#                 if isinstance(outputs, dict):
+#                     outputs = outputs['out']
+
+#                 # Get predictions
+#                 preds = torch.argmax(outputs, dim=1)
+
+#                 # Move to CPU
+#                 images = images[:num_samples].cpu()
+#                 masks = masks[:num_samples].cpu()
+#                 preds = preds[:num_samples].cpu()
+
+#                 for i in range(min(num_samples, len(images))):
+#                     img = images[i]
+#                     mask = masks[i]
+#                     pred = preds[i]
+
+#                     # Denormalise image
+#                     if denormalise:
+#                         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+#                         std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+#                         img = img * std + mean
+#                         img = torch.clamp(img, 0.0, 1.0)
+
+#                     # Convert to numpy (H, W, C) format for wandb
+#                     img_np = img.permute(1, 2, 0).numpy()
+                    
+#                     # Remove channel dimension if present and convert to uint8
+#                     mask_np = mask.squeeze().numpy() if mask.dim() == 3 else mask.numpy()
+#                     pred_np = pred.squeeze().numpy() if pred.dim() == 3 else pred.numpy()
+                    
+#                     # Normalize masks to 0-255 range for visualization
+#                     mask_np = (mask_np * 255 / max(mask_np.max(), 1)).astype(np.uint8)
+#                     pred_np = (pred_np * 255 / max(pred_np.max(), 1)).astype(np.uint8)
+                    
+#                     # Convert grayscale masks to RGB for easier viewing
+#                     mask_rgb = np.stack([mask_np]*3, axis=-1)
+#                     pred_rgb = np.stack([pred_np]*3, axis=-1)
+
+#                     # Log images
+#                     images_to_log.append(wandb.Image(img_np, caption=f"Sample {i+1}: Image"))
+#                     images_to_log.append(wandb.Image(mask_rgb, caption=f"Sample {i+1}: Ground Truth"))
+#                     images_to_log.append(wandb.Image(pred_rgb, caption=f"Sample {i+1}: Prediction"))
+
+#                 break  # Only one batch
+        
+#         model.train()
+#         return images_to_log
+        
+#     except Exception as e:
+#         log.error(f"Visualization error: {e}", exc_info=True)
+#         model.train()
+#         return []
+
+
+# # continuous wandb training from previous runs
+# # model_run_ids = {
+# #     "FPN": "f9nhdf5r",
+# #     "Unet": "tsab9f1v",
+# #     "DeepLabV3": "isst5072",
+# #     "DinoV3": "1ycmbstp",
+# #     "ViT": "g2gdkxkp"
+# #     }
+
+# # training from new wandb run
+# model_run_ids = None
+
+# @hydra.main(version_base=None, config_path="conf", config_name="config")
+# def main(cfg: DictConfig):
+
+#     print("Config keys:", list(cfg.keys()))
+#     print("Training config:", cfg.training)
+#     print("Model config:", cfg.model)
+
+#     # Set random seed
+#     set_seed(cfg["seed"])
+#     job_id = None
+#     if model_run_ids is not None:
+#         job_id = model_run_ids.get(cfg.model.name)
+
+#     init_wandb(cfg, job_id=job_id)
+#     print("wandb init done")
+#     print(60*"=")
+#     print(f"model name: {cfg.model.name}, job_id: {job_id}")
+#     print(60*"=")
+
+#     # Force CUDA device if available
+#     if torch.cuda.is_available():
+#         cfg.device = "cuda"
+#         torch.cuda.empty_cache()
+#     else:
+#         print("WARNING: CUDA not available, using CPU")
+#         cfg.device = "cpu"
+        
+
+#     # Set device
+#     device = torch.device(cfg.device)
+#     print(f"Using device: {device}")
+
+#     # save models
+#     base_save_dir = cfg.save_dir
+#     model_specific_dir = os.path.join(base_save_dir, cfg.model.name)
+#     os.makedirs(model_specific_dir, exist_ok=True)
+#     # save models with specific names
+#     model_name_prefix = f"{cfg['model']['name']}_retrain_090226_debug"
+#     best_loss_model_path = os.path.abspath(
+#         os.path.join(model_specific_dir, f"{model_name_prefix}_best_loss.pth")
+#     )
+#     best_iou_model_path = os.path.abspath(
+#         os.path.join(model_specific_dir, f"{model_name_prefix}_best_iou.pth")
+#     )
+#     metric_path = os.path.abspath(
+#         os.path.join(model_specific_dir, f"{model_name_prefix}_metrics.csv")
+#     )
+
+#     checkpoint_path = os.path.abspath(
+#         os.path.join(model_specific_dir, f"{model_name_prefix}_latest_epoch.pth")
+#     )
+#     print(f"Does checkpoint exist? {os.path.exists(checkpoint_path)}")
+    
+#     # Get data loaders
+#     train_loader, val_loader = get_data_loaders(cfg)
+#     log.info("After DataLoader creation")
+
+#     # Load the model
+#     print("Loading model...")
+#     model = load_model(cfg, device)
+#     model = model.to(device)
+   
+#     # Load loss function, optimizer, and scheduler
+#     loss_function = get_loss_function(cfg)
+#     if hasattr(loss_function, 'to'):
+#         loss_function = loss_function.to(device)
+#     optimizer = get_optimizer(cfg, model)
+#     scheduler = get_scheduler(cfg, optimizer)
+
+#     # Check if checkpoint exists and load if specified
+#     start_epoch = 0
+#     best_val_loss = float("inf")
+#     best_val_iou = 0.0
+#     epochs_without_improvement = 0
+#     early_stopping_patience = cfg.get("early_stopping_patience", None)
+#     early_stopping_metric = cfg.get("early_stopping_metric", "val_loss")  # or "val_iou"
+    
+   
+#     if cfg.get("load_path", False) and os.path.exists(checkpoint_path):
+#         log.info(f"Loading model weights from {checkpoint_path}")
+#         checkpoint = torch.load(
+#             checkpoint_path, map_location=device, weights_only=False
+#         )
+        
+#         print(f"Checkpoint keys: {list(checkpoint.keys()) if checkpoint else 'None'}")
+        
+#         # Load FULL model state (decoder + segmentation head)
+#         model = load_full_model_state(model, checkpoint["model_state_dict"], cfg["model"]["name"])
+        
+#         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+#         if scheduler is not None and "scheduler_state_dict" in checkpoint:
+#             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+#         elif scheduler is None:
+#             log.info("Scheduler is None - skipping scheduler state loading")
+            
+#         start_epoch = checkpoint.get("epoch", 0) + 1
+#         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+#         best_val_iou = checkpoint.get("best_val_iou", 0.0)
+        
+#         log.info(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
+#         print(f"Full model state loaded successfully. Resuming from epoch {start_epoch}")
+#     else:
+#         log.info("No valid load_path specified or file does not exist. Training from scratch.")
+        
+#     for epoch in range(start_epoch, cfg["training"]["epochs"]):
+#         print(f"\n{'='*10} Epoch {epoch + 1}/{cfg['training']['epochs']} {'='*10}")
+#         print(f"DEBUG: start_epoch={start_epoch}, training.epochs={cfg['training']['epochs']}")
+        
+#         # Train one epoch
+#         train_loss = train_one_epoch(
+#             model,
+#             train_loader,
+#             loss_function,
+#             optimizer,
+#             device,
+#             cfg,
+#             log,
+#             epoch=epoch,
+#         )
+#         print(f"train_one_epoch returned successfully. Loss: {train_loss:.4f}")
+#         print("About to call validate_with_metrics...")
+
+#         val_metrics = validate_with_metrics(
+#             model, val_loader, loss_function, device, cfg, log, epoch=epoch
+#         )
+#         print(f"validate_with_metrics returned successfully.")
+#         val_loss = val_metrics["val_loss"]
+#         val_iou = val_metrics["val_iou"]
+#         print(f"Epoch {epoch + 1} Results:")
+#         print(f"  Train Loss: {train_loss:.4f}")
+#         print(f"  Val Loss: {val_loss:.4f}")
+#         print(f"  Val IoU: {val_iou:.4f}")
+        
+#         # Update scheduler
+#         if scheduler is not None:
+#             scheduler.step()
+
+#         if cfg.get("use_wandb", False):
+#             wandb_metrics = {
+#                 "epoch": epoch,
+#                 "train_epoch_loss": train_loss,
+#                 "val_loss": val_loss,
+#                 "val_mean_iou": val_iou,
+#                 "val_mean_precision": val_metrics["mean_precision"],
+#                 "val_mean_recall": val_metrics["mean_recall"],
+#                 "val_mean_f1": val_metrics["mean_f1"],
+#             }
+            
+#             # Add per-class metrics if available
+#             if "class_ious" in val_metrics and cfg.get("class_names"):
+#                 class_ious = val_metrics["class_ious"]
+#                 class_names = cfg["class_names"]
+#                 for i, class_name in enumerate(class_names):
+#                     wandb_metrics[f"val_iou_{class_name}"] = class_ious[i].item() if hasattr(class_ious[i], 'item') else class_ious[i]
+#                     if "precision_per_class" in val_metrics:
+#                         wandb_metrics[f"val_precision_{class_name}"] = val_metrics["precision_per_class"][i]
+#                     if "recall_per_class" in val_metrics:
+#                         wandb_metrics[f"val_recall_{class_name}"] = val_metrics["recall_per_class"][i]
+            
+#             wandb.log(wandb_metrics)
+            
+#             # Log visualisations every 15 epochs
+#             if (epoch + 1) % 15 == 0:
+#                 print(f"Logging visualisations to wandb for epoch {epoch + 1}...")
+#                 try:
+#                     log.info(f"Starting visualization logging for epoch {epoch + 1}")
+#                     vis_images = log_visualisations_to_wandb(
+#                         model, val_loader, device, 
+#                         num_samples=2, 
+#                         denormalise=True 
+#                     )
+                    
+#                     if vis_images:
+#                         log.info(f"Successfully created {len(vis_images)} visualization images, logging to wandb...")
+#                         wandb.log({"validation_predictions": vis_images}, step=epoch)
+#                         print(f"Successfully logged {len(vis_images)} visualisation images to wandb")
+#                     else:
+#                         log.warning("No visualization images were created")
+#                         print("Warning: No visualization images were created")
+                    
+#                     # Clean up
+#                     del vis_images
+#                     torch.cuda.empty_cache()
+#                 except Exception as e:
+#                     log.error(f"Failed to log visualisations: {e}", exc_info=True)
+#                     print(f"Error: Failed to log visualisations: {e}")
+#                     # Don't fail the entire training loop for visualization issues
+            
+#         if os.path.exists(metric_path):
+#             with open(metric_path, "a") as f:
+#                 f.write(
+#                     f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
+#                 )
+#         else:
+#             with open(metric_path, "w") as f:
+#                 f.write("epoch,train_loss,val_loss,val_iou\n")
+#                 f.write(
+#                     f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{val_iou:.4f}\n"
+#                 )
+
+#         # Track saved a best model this epoch
+#         saved_best_model = False
+        
+#         # Check and save ONLY if new best loss
+#         if val_loss < best_val_loss:
+#             best_val_loss = val_loss
+#             epochs_without_improvement = 0  # Reset early stopping counter
+#             print(f" NEW BEST LOSS! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
+            
+#             save_model(
+#                 best_loss_model_path,
+#                 model,
+#                 optimizer,
+#                 scheduler,
+#                 epoch,
+#                 best_val_loss,
+#                 best_val_iou,
+#                 cfg,
+#             )
+#             print(f"Best loss model saved/updated: {best_loss_model_path}")
+#             saved_best_model = True
+
+#         # Check and save ONLY if new best IoU  
+#         if val_iou > best_val_iou:
+#             best_val_iou = val_iou
+#             epochs_without_improvement = 0  # Reset early stopping counter
+#             print(f" NEW BEST IoU! Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
+            
+#             save_model(
+#                 best_iou_model_path,
+#                 model,
+#                 optimizer,
+#                 scheduler,
+#                 epoch,
+#                 best_val_loss,
+#                 best_val_iou,
+#                 cfg,
+#             )
+#             print(f"Best IoU model saved/updated: {best_iou_model_path}")
+#             saved_best_model = True
+
+#         save_model(
+#             checkpoint_path,
+#             model,
+#             optimizer,
+#             scheduler,
+#             epoch,
+#             best_val_loss,
+#             best_val_iou,
+#             cfg,
+#         )
+#         print(f" Latest checkpoint updated: {checkpoint_path}")
+
+#         # Print saving summary for this epoch
+#         if saved_best_model:
+#             print(" This epoch produced a new best model!")
+#         else:
+#             print("No new best model this epoch (normal)")
+
+#         # Early stopping check
+#         if early_stopping_patience is not None:
+#             if not saved_best_model:
+#                 epochs_without_improvement += 1
+#                 print(f"No improvement for {epochs_without_improvement}/{early_stopping_patience} epochs")
+            
+#             if epochs_without_improvement >= early_stopping_patience:
+#                 print(f"\n{'='*60}")
+#                 print(f"EARLY STOPPING TRIGGERED!")
+#                 print(f"No improvement in {early_stopping_metric} for {early_stopping_patience} epochs")
+#                 print(f"Best {early_stopping_metric}: {best_val_loss if early_stopping_metric == 'val_loss' else best_val_iou:.4f}")
+#                 print(f"{'='*60}")
+#                 break
+
+#         torch.cuda.empty_cache()
+#         gc.collect()
+#         print(f"EPOCH {epoch + 1} COMPLETED SUCCESSFULLY")
+#         print(f"About to continue to next epoch...")
+
+#     # Final evaluation
+#     print(f"\n{'='*20} Final Evaluation {'='*20}")
+
+#     if os.path.exists(best_loss_model_path):
+#         print("Evaluating best loss model...")
+#         best_loss_metrics = evaluate_model(
+#             best_loss_model_path, val_loader, device, cfg, log
+#         )
+
+#     # Evaluate best IoU model
+#     if os.path.exists(best_iou_model_path):
+#         print("\nEvaluating best IoU model...")
+#         best_iou_metrics = evaluate_model(
+#             best_iou_model_path, val_loader, device, cfg, log
+#         )
+
+#     # Final wandb logging
+#     if cfg.get("use_wandb", False):
+#         final_wandb_metrics = {
+#             "final_best_val_loss": best_val_loss,
+#             "final_best_val_iou": best_val_iou,
+#             "total_epochs_trained": cfg["training"]["epochs"],
+#         }
+
+#         if "best_loss_metrics" in locals():
+#             final_wandb_metrics.update(
+#                 {
+#                     f"final_best_loss_model_{k}": v
+#                     for k, v in best_loss_metrics.items()
+#                     if isinstance(v, (int, float))  # Only log scalar values to wandb
+#                 }
+#             )
+
+#         if "best_iou_metrics" in locals():
+#             final_wandb_metrics.update(
+#                 {
+#                     f"final_best_iou_model_{k}": v
+#                     for k, v in best_iou_metrics.items()
+#                     if isinstance(v, (int, float))  # Only log scalar values to wandb
+#                 }
+#             )
+
+#         wandb.log(final_wandb_metrics)
+#         wandb.finish()
+
+#     # Print summary
+#     print("\n" + "=" * 60)
+#     print("TRAINING SUMMARY:")
+#     print("=" * 60)
+#     print(f"Total epochs trained: {cfg['training']['epochs']}")
+#     print(f"Best validation loss: {best_val_loss:.4f}")
+#     print(f"Best validation IoU: {best_val_iou:.4f}")
+#     print(f"Best loss model saved at: {best_loss_model_path}")
+#     print(f"Best IoU model saved at: {best_iou_model_path}")
+#     print("=" * 60)
+
+#     return best_val_loss, best_val_iou
+
+
+# if __name__ == "__main__":
+#     main()
