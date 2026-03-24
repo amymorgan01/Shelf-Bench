@@ -88,7 +88,7 @@ class IceDataset(Dataset):
             # No transforms for validation
             self.transform = A.Compose([])
 
-        self.normalize = A.Normalize(mean=0.3047126829624176, std=0.32187142968177795)
+        self.normalize = A.Normalize(mean=0.4768397510, std=0.2779399157)    # train mean & std  #caffe mean=0.3047126829624176, std=0.32187142968177795
 
     def __len__(self):
         """
