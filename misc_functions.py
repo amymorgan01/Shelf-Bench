@@ -25,8 +25,7 @@ def init_wandb(cfg: DictConfig, job_id: Optional[str] = None):
     if wandb.run is None:
         wandb.init(
             project="Shelf-Bench", 
-            # name="trial_initial_runs",
-            entity="amy-morgan-university-of-oxford", #change to your wandb username
+            entity="amy-morgan-university-of-oxford",
             settings=wandb.Settings(start_method="thread"),
             job_type="training",
             id=job_id,
@@ -35,21 +34,31 @@ def init_wandb(cfg: DictConfig, job_id: Optional[str] = None):
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-        # Update config with sweep parameters
-        if wandb.config is not None:
-            # Update training parameters
-            for key, value in wandb.config.training.items():
-                if hasattr(cfg.training, key):
-                    setattr(cfg.training, key, value)
+    # Flat sweep config → nested cfg
+    # In a sweep, wandb.config is flat: {"learning_rate": 1e-4, "batch_size": 16, ...}
+    # We need to map these back into the nested Hydra cfg
+    sweep_cfg = dict(wandb.config)
 
-            # Update model parameters
-            for key, value in wandb.config.model.items():
-                if hasattr(cfg.model, key):
-                    setattr(cfg.model, key, value)
+    flat_map = {
+        # training params
+        "learning_rate":    ("training", "learning_rate"),
+        "batch_size":       ("training", "batch_size"),
+        "weight_decay":     ("training", "weight_decay"),
+        "loss_function":    ("training", "loss_function"),
+        "optimizer":        ("training", "optimizer"),
+        # model params
+        "model_name":       ("model", "name"),
+        "freeze_backbone":  ("model", "freeze_backbone"),
+        "encoder_name":     ("model", "encoder_name"),
+    }
 
-            # Update device
-            if hasattr(wandb.config, "device"):
-                cfg.device = wandb.config.device
+    for sweep_key, (section, cfg_key) in flat_map.items():
+        if sweep_key in sweep_cfg:
+            try:
+                OmegaConf.update(cfg, f"{section}.{cfg_key}", sweep_cfg[sweep_key])
+                print(f"Sweep override: {section}.{cfg_key} = {sweep_cfg[sweep_key]}")
+            except Exception as e:
+                print(f"Warning: could not set {section}.{cfg_key}: {e}")
 
 
 def save_model(
@@ -62,10 +71,10 @@ def save_model(
     val_iou: float,
     cfg: DictConfig,
 ):
-    """
-    Save full model state including decoder and segmentation head.
-    The encoder weights are not saved since they remain frozen with pretrained weights.
-    """
+
+
+    """Save full model state dict including encoder, decoder, and segmentation head."""
+
     
     # Save the FULL model state (decoder + segmentation head)
     # This works for all model types
