@@ -7,7 +7,7 @@ defaults:
 
 paths:
   root_local: "/home/users/amorgan/benchmark_CB_AM"
-  root_gws: "/gws/nopw/j04/iecdt/amorgan"
+  root_gws: "/gws/ssde/j25b/iecdt/amorgan"
 
 # Main configuration
 seed: 0
@@ -42,7 +42,7 @@ training:
   batch_size: 32
   learning_rate: 1e-4
   weight_decay: 1e-4
-  epochs: 150
+  epochs: 200
   loss_function: "DiceLoss"
   optimizer: "Adam"
   log_interval: 100
@@ -50,7 +50,7 @@ training:
   accumulate_grad_batches: 4
 
 # Early stopping configuration
-early_stopping_patience: 60  # Stop if no improvement for 40 epochs (set to null to disable)
+early_stopping_patience: 40  # Stop if no improvement for 40 epochs (set to null to disable)
 early_stopping_metric: "val_loss"  # Can be "val_loss" or "val_iou"
 
 data:
