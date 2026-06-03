@@ -1,8 +1,8 @@
 # output directory, generated dynamically on each run
 run:
-  dir: ${hydra:runtime.cwd}/logs/${name}/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dir: /gws/ssde/j25b/iecdt/amorgan/benchmark_data_CB/model_outputs/logs/${name}/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
 sweep:
-  dir: logs/${name}/multiruns/
+  dir: /gws/ssde/j25b/iecdt/amorgan/benchmark_data_CB/model_outputs/logs/${name}/multiruns/
   subdir: ${now:%Y-%m-%d}_${now:%H-%M-%S}/${hydra.job.num}
 job:
   chdir: True

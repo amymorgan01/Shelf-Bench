@@ -12,8 +12,8 @@ paths:
 # Main configuration
 seed: 0
 name: "ice_bench_seg"
-save_dir: "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/model_outputs/"
-data_root: "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/preprocessed_data/train/images"
+save_dir: "/gws/ssde/j25b/iecdt/amorgan/benchmark_data_CB/model_outputs/"
+data_root: "/gws/ssde/j25b/iecdt/amorgan/benchmark_data_CB/preprocessed_data/train/images"
 load_path: true
 use_wandb: true
 class_names: ["Ocean", "Ice"]
@@ -56,4 +56,4 @@ early_stopping_metric: "val_loss"  # Can be "val_loss" or "val_iou"
 data:
   img_size: 256
   augmentation_prob: 0.5
-  parent_dir: "/gws/nopw/j04/iecdt/amorgan/benchmark_data_CB/ICE-BENCH/preprocessed_data" #updated jan 2026 to include all scenes
+  parent_dir: "/gws/ssde/j25b/iecdt/amorgan/benchmark_data_CB/ICE-BENCH/preprocessed_data" #updated jan 2026 to include all scenes

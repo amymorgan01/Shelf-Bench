@@ -39,3 +39,5 @@ epoch_check.py
 plot_training_vis.py
 test.ipynb
 training_curves.py
+wandb/
+timing_results/

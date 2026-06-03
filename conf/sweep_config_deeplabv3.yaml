@@ -1,0 +1,38 @@
+# sweep_config.yaml
+program: sweep_train.py
+
+method: bayes  # Bayesian optimisation — more efficient than random for val_loss
+
+metric:
+  name: val_loss
+  goal: minimize
+
+parameters:
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 1e-3
+
+  model_name:             
+    value: "DeepLabV3"
+
+  epochs:
+    value: 200
+
+
+  freeze_backbone:
+    value: false
+
+  weight_decay:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 1e-3
+
+  batch_size:
+    values: [8, 16, 32]
+
+  loss_function:
+    values: ["CombinedLoss", "CombinedLossDCE"]  
+
+  optimizer:
+    values: ["Adam"]

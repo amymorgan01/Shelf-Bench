@@ -9,7 +9,7 @@ import logging
 import torch.nn as nn
 import torch.optim as optim
 import wandb
-
+from pathlib import Path
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -34,9 +34,6 @@ def init_wandb(cfg: DictConfig, job_id: Optional[str] = None):
             config=OmegaConf.to_container(cfg, resolve=True),
         )
 
-    # Flat sweep config → nested cfg
-    # In a sweep, wandb.config is flat: {"learning_rate": 1e-4, "batch_size": 16, ...}
-    # We need to map these back into the nested Hydra cfg
     sweep_cfg = dict(wandb.config)
 
     flat_map = {
@@ -61,6 +58,7 @@ def init_wandb(cfg: DictConfig, job_id: Optional[str] = None):
                 print(f"Warning: could not set {section}.{cfg_key}: {e}")
 
 
+
 def save_model(
     path: str,
     model: nn.Module,
@@ -71,29 +69,34 @@ def save_model(
     val_iou: float,
     cfg: DictConfig,
 ):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        # Make state dict CPU-safe
+        model_state = {
+            k: v.detach().cpu()
+            for k, v in model.state_dict().items()
+        }
 
-    """Save full model state dict including encoder, decoder, and segmentation head."""
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": model_state,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+            "best_val_loss": float(val_loss),
+            "best_val_iou": float(val_iou),
+            "cfg": OmegaConf.to_container(cfg, resolve=True),  # plain dict, not DictConfig
+        }
 
-    
-    # Save the FULL model state (decoder + segmentation head)
-    # This works for all model types
-    checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),  # Save everything
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": (scheduler.state_dict() if scheduler else None),
-        "best_val_loss": val_loss,
-        "best_val_iou": val_iou,
-        "config": cfg,
-    }
-    
-    torch.save(checkpoint, path)
-    
-    # Log what we saved
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Saved model to {path}")
-    print(f"  Total params in state_dict: {total_params:,}")
-    print(f"  Trainable params: {trainable_params:,}")
-    
+        torch.save(checkpoint, str(path))
+        print(f"Saved model to {path}")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Total params in state_dict: {total_params:,}")
+        print(f"  Trainable params: {trainable_params:,}")
+
+    except Exception:
+        print(f"ERROR: failed to save checkpoint to {path}")
+        raise
