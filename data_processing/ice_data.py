@@ -4,11 +4,11 @@ DataLoader for SHELF-BENCH
 """
 
 import os
-import torch
-from torch.utils.data import Dataset
-import cv2
+
 import albumentations as A
-from pathlib import Path
+import cv2
+from albumentations.pytorch import ToTensorV2
+from torch.utils.data import Dataset
 
 
 class IceDataset(Dataset):
@@ -65,30 +65,24 @@ class IceDataset(Dataset):
             self.mask_files = self.mask_files[:min_count]
             print(f"Using {min_count} image-mask pairs")
 
-        # Data augmentation transforms (only applied during training)
+        transforms = []
         if self.augment:
-            self.transform = A.Compose(
-                [
-                    A.RandomRotate90(p=0.5),
-                    A.HorizontalFlip(p=0.5),
-                    A.VerticalFlip(p=0.3),
-                    A.OneOf(
-                        [
-                            A.RandomBrightnessContrast(
-                                brightness_limit=0.2, contrast_limit=0.2, p=1.0
-                            ),
-                            A.GaussNoise(),  # var_limit=(10.0, 50.0), p=1.0),
-                        ],
-                        p=0.3,
-                    ),
-                    A.RandomGamma(gamma_limit=(80, 120), p=0.2),
-                ]
-            )
-        else:
-            # No transforms for validation
-            self.transform = A.Compose([])
+            transforms = [
+                A.RandomRotate90(p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.3),
+                A.OneOf(
+                    [
+                        A.RandomBrightnessContrast(brightness_range=(-0.2, 0.2), contrast_range=(-0.2, 0.2), p=1.0),
+                        A.GaussNoise(std_range=(0.2, 0.44), per_channel=True),
+                    ],
+                    p=0.3,
+                ),
+                A.RandomGamma(gamma_range=(80, 120), p=0.2),
+            ]
 
-        self.normalize = A.Normalize(mean=0.4768397510, std=0.2779399157)    # train mean & std  #caffe mean=0.3047126829624176, std=0.32187142968177795
+        # Train mean and std; Caffe mean=0.3047126829624176, std=0.32187142968177795
+        self.transform = A.Compose([*transforms, A.Normalize(mean=0.4768397510, std=0.2779399157), ToTensorV2()])
 
     def __len__(self):
         """
@@ -117,12 +111,8 @@ class IceDataset(Dataset):
             raise ValueError(f"Could not load mask: {mask_path}")
 
         transformed = self.transform(image=image_np, mask=mask_np)
-        image_transformed, mask_transformed = transformed["image"], transformed["mask"]
-        image_normalized = self.normalize(image=image_transformed)["image"]
-
-        image_tensor = torch.from_numpy(image_normalized).float().unsqueeze(0)
-
-        mask_tensor = torch.from_numpy(mask_transformed).float().unsqueeze(0)
+        image_tensor = transformed["image"].float()
+        mask_tensor = transformed["mask"].float().unsqueeze(0)
 
         return image_tensor, mask_tensor
 
